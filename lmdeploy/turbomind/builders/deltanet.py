@@ -82,24 +82,12 @@ class DeltaNetBuilder(Builder):
         q, k, v = split_qkv(in_proj_qkv,
                             num_k_heads=self.config.num_k_heads,
                             num_v_heads=self.config.num_v_heads)
-        # The packed 4-bit weight kernel requires the output (N) dimension to be
-        # a multiple of 32. The fused GDN projection appends the narrow B/A
-        # sections (e.g. 48 / tp), which can break that alignment per TP shard
-        # (e.g. 27B: 16480 / 2 = 8240). When so, dequantize the fused
-        # projection to trivial so it runs on the fp16 family instead.
-        parts = [t for t in (q, k, v, in_proj_z, in_proj_b, in_proj_a) if t is not None]
-        total = sum(int(t.tensors['weight'].shape[-1]) for t in parts)
-        tp = self.tp.size or 1
-        nvfp4 = any(getattr(t.weight_format, 'name', '') == 'nvfp4' for t in parts)
-        if nvfp4 and (total % tp or (total // tp) % 32):
-            from .linear import _dequant_linear
-            parts = [_dequant_linear(t, dtype=self._ctx.dtype) for t in parts]
-            q, k, v = parts[0], parts[1], parts[2]
-            rest = parts[3:]
-            z = rest[0] if len(rest) > 0 else None
-            b = rest[1] if len(rest) > 1 else None
-            a = rest[2] if len(rest) > 2 else None
-        q, k, v, z, b, a = dequant_mixed(q, k, v, z, b, a, dtype=self._ctx.dtype)
+        # The SM75 NVFP4 kernel uses a row-major packed B (align.y = 1), so the
+        # fused GDN projection (whose per-shard N can be unaligned, e.g. 27B
+        # 16480 / 2 = 8240) runs directly on the 4-bit kernel — no dequant
+        # fallback needed.
+        q, k, v, z, b, a = dequant_mixed(q, k, v, in_proj_z, in_proj_b, in_proj_a,
+                                         dtype=self._ctx.dtype)
         fused = fuse_gdn(q, k, v, z, b, a, tp=self.tp.size)
         self._add_linear('in_proj_all', fused, SplitSide.OUTPUT)
         if out_proj is not None:

@@ -47,7 +47,7 @@ const Family u4_g_128{11, 189, kHalf, kHalf, 128, 8, 1, 1, true, true, supports_
 const Family mxfp4{12, 190, kHalf, kHalf, 32, 8, 1, 1, true, true, supports_mxfp4, mxfp4_packer};
 
 constexpr auto nvfp4_packer =
-    pack_nvfp4<Sm75, kColMajor, HMMA_16816 | OPERAND_B | 1, kColMajor, HMMA_16816 | OPERAND_V | 1>;
+    pack_nvfp4<Sm75, kRowMajor, HMMA_16816 | OPERAND_B | 1, kColMajor, HMMA_16816 | OPERAND_V | 1>;
 
 // Dense NVFP4: E2M1 weights (B) + per-group-16 half scales (V), flat layout.
 const Family nvfp4{13, 190, kHalf, kHalf, 16, 8, 1, 1, true, false, supports_nvfp4, nvfp4_packer};
