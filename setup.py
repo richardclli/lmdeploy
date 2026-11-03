@@ -139,6 +139,18 @@ def parse_requirements(fname='requirements.txt', with_version=True):
 if get_target_device() == 'cuda' and os.getenv('DISABLE_TURBOMIND', '').lower() not in ('yes', 'true', 'on', 't', '1'):
     import cmake_build_extension
 
+    # Some hosts lack a python<X.Y>-devel package, so the interpreter's
+    # sysconfig include dir (e.g. /usr/include/python3.12) may not exist while
+    # the headers are shipped elsewhere. Allow an explicit override so pybind11
+    # resolves PYTHON_INCLUDE_DIR correctly.
+    _py_include = os.getenv('LMDEPLOY_PYTHON_INCLUDE_DIR', '').strip()
+    _py_include_opts = [] if not _py_include else [
+        f'-DPYTHON_INCLUDE_DIR={_py_include}',
+        f'-DPYTHON_INCLUDE_DIRS={_py_include}',
+        f'-DPython3_INCLUDE_DIR={_py_include}',
+        f'-DPython_INCLUDE_DIR={_py_include}',
+    ]
+
     ext_modules = [
         cmake_build_extension.CMakeExtension(
             name='lmdeploy.turbomind._turbomind',
@@ -154,6 +166,7 @@ if get_target_device() == 'cuda' and os.getenv('DISABLE_TURBOMIND', '').lower() 
                 '-DBUILD_PY_FFI=ON',
                 '-DBUILD_MULTI_GPU=' + ('OFF' if os.name == 'nt' else 'ON'),
                 '-DUSE_NVTX=' + ('OFF' if os.name == 'nt' else 'ON'),
+                *_py_include_opts,
             ],
         ),
     ]
