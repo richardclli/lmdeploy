@@ -166,6 +166,14 @@ class WeightFormat(ABC):
             self.zeros_dtype,
         )
 
+    def finalize(self, tensors: dict[str, Tensor]) -> dict[str, Tensor]:
+        """Optional post-resolve hook to fold auxiliary tensors.
+
+        Runs after ``normalize`` on the full resolved bundle (e.g. to fold a
+        per-tensor ``global_scale`` into the block scales). Default: identity.
+        """
+        return tensors
+
     def __eq__(self, other) -> bool:
         return (
             type(self) is type(other)
@@ -462,6 +470,9 @@ class MXFP4Format(WeightFormat):
         return PackedTensor(tensor, None, None)
 
 
+_E2M1_VALUES = (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0)
+
+
 class NVFP4Format(WeightFormat):
     """NVFP4 (E2M1 codes, group-16 ``float8_e4m3`` scales, per-tensor global).
 
@@ -479,7 +490,10 @@ class NVFP4Format(WeightFormat):
         '.bias': 'bias',
     }
     weight_dtype = _tm.DataType.TYPE_FP4_E2M1
-    scales_dtype = _tm.DataType.TYPE_FP8_E4M3
+    # The on-device scale is a plain half: ``finalize`` folds the per-tensor
+    # global scale into the e4m3 block scales and converts to fp16, matching
+    # the SM75 NVFP4 kernel's ``{kFloat4_e2m1, {16,1}, kHalf}`` format.
+    scales_dtype = _tm.DataType.TYPE_FP16
     zeros_dtype = _tm.DataType.TYPE_INVALID
 
     def __init__(self, *, block_in: int = 16):
@@ -511,15 +525,38 @@ class NVFP4Format(WeightFormat):
         # global_scale is per-tensor: leave as-is.
         return x
 
+    def finalize(self, tensors: dict[str, Tensor]) -> dict[str, Tensor]:
+        """Fold ``weight_global_scale`` into the block scales as fp16."""
+        global_scale = tensors.pop('global_scale', None)
+        if global_scale is not None and 'scales' in tensors:
+            scales = tensors['scales'].to(torch.float32)
+            gs = global_scale.to(torch.float32).reshape(-1)
+            if gs.numel() == 1:
+                scales = scales / gs.reshape(())
+            else:
+                scales = scales / gs.reshape(gs.shape + (1, ) * (scales.dim() - gs.dim()))
+            tensors['scales'] = scales.to(torch.float16)
+        return tensors
+
     def pack(self, tensor: Tensor, kind: str) -> PackedTensor:
         if kind == 'weight' and tensor.dtype == torch.uint8:
             return PackedTensor(pack_u4_row(tensor), list(tensor.shape), self.weight_dtype)
-        if kind == 'scales':
-            # e4m3 bytes are stored verbatim in a FP8_E4M3 slot.
-            return PackedTensor(tensor.view(torch.uint8), None, self.scales_dtype)
-        if kind == 'global_scale':
-            return PackedTensor(tensor.to(torch.float32), None, _tm.DataType.TYPE_FP32)
         return PackedTensor(tensor, None, None)
+
+    def dequant(self, tensors, dtype):
+        """Decode E2M1 codes and half scales to a dense weight (mixed fusion)."""
+        codes = tensors['weight']
+        scales = tensors['scales']
+        table = codes.new_tensor(_E2M1_VALUES)
+        sign = (codes & 0x8).to(torch.bool)
+        mag = (codes & 0x7).long()
+        values = table[mag] * torch.where(sign, -1.0, 1.0)
+        scale = scales.to(torch.float32).repeat_interleave(self.block_in, dim=0)
+        weight = values.to(torch.float32) * scale
+        result: dict[str, Tensor] = {'weight': weight.to(dtype)}
+        if 'bias' in tensors:
+            result['bias'] = tensors['bias']
+        return result
 
 
 # ---------------------------------------------------------------------------
