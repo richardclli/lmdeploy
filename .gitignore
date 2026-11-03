@@ -57,6 +57,8 @@ lmdeploy/bin/
 lmdeploy/turbomind/_turbomind*.so
 lmdeploy/turbomind/_turbomind*.pyd
 lmdeploy/turbomind/lib/
+# DeepEP headers installed into the source tree by the TurboMind build.
+lmdeploy/turbomind/include/
 dist/
 examples/cpp/llama/*.csv
 *.npy
