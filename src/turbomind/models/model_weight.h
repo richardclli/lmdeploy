@@ -4,6 +4,7 @@
 #include "src/turbomind/core/core.h"
 #include "src/turbomind/core/module.h"
 #include "src/turbomind/models/linear_weight.h"
+#include "src/turbomind/models/mtp_weight.h"
 #include "src/turbomind/models/norm_weight.h"
 #include "src/turbomind/utils/memory_utils.h"
 
@@ -31,6 +32,7 @@ struct ModelWeightConfig: ModuleConfig {
 namespace turbomind {
 
 class DecoderLayerWeight;
+class MtpWeight;
 
 /// Root weight module for a model. Owns the full weight tree.
 class ModelWeight: public core::Module {
@@ -52,7 +54,8 @@ public:
     X(LinearWeight, output)                                                                                            \
     X(NormWeight, norm)                                                                                                \
     X(core::ModuleList, layers)                                                                                        \
-    X(core::ModuleList, meta_experts)
+    X(core::ModuleList, meta_experts)                                                                                  \
+    X(MtpWeight, mtp)
 
 #define MODEL_WEIGHT_PARAMS(X) X(tok_embeddings)
 

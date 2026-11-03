@@ -4,6 +4,7 @@
 #include "src/turbomind/core/registry.h"
 #include "src/turbomind/models/attention_weight.h"
 #include "src/turbomind/models/decoder_layer_weight.h"
+#include "src/turbomind/models/mtp_weight.h"
 
 namespace turbomind {
 

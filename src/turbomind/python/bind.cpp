@@ -38,6 +38,7 @@
 #include "src/turbomind/models/linear_weight.h"
 #include "src/turbomind/models/model_weight.h"
 #include "src/turbomind/models/moe_weight.h"
+#include "src/turbomind/models/mtp_weight.h"
 #include "src/turbomind/models/norm_weight.h"
 #include "src/turbomind/models/qwenvit/qwenvit_block_weight.h"
 #include "src/turbomind/models/qwenvit/qwenvit_input.h"
@@ -625,6 +626,7 @@ PYBIND11_MODULE(_turbomind, m)
     bind_config<turbomind::core::NormConfig>(m, "NormConfig");
     bind_config<turbomind::core::DecoderLayerConfig>(m, "DecoderLayerConfig");
     bind_config<turbomind::core::ModelWeightConfig>(m, "ModelWeightConfig");
+    bind_config<turbomind::core::MtpWeightConfig>(m, "MtpWeightConfig");
     bind_config<turbomind::core::LayerNormConfig>(m, "LayerNormConfig");
     bind_config<turbomind::core::QwenVitConfig>(m, "QwenVitConfig");
     bind_config<turbomind::core::QwenVitBlockConfig>(m, "QwenVitBlockConfig");

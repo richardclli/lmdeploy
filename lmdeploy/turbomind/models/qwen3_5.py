@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+import os
 import re
 import struct
 from typing import TYPE_CHECKING, Any
@@ -147,7 +148,50 @@ class Qwen3_5TextModel(TextModel):
                   else pfx + 'lm_head')
         builder.add_lm_head(self._linear(lm_pfx))
         builder.layers = self.layers(pfx + 'model.language_model.layers')
+        # MTP draft head (Qwen3.5 native, 1 full-attention layer). Optional:
+        # present only when the checkpoint ships `mtp.*` tensors. Loaded by
+        # default; `TM_MTP=0` skips it (used to A/B the loader cost).
+        if os.environ.get('TM_MTP', '1') != '0':
+            mtp_fc = self._linear(pfx + 'mtp.fc', optional=True)
+            if mtp_fc is not None:
+                builder.mtp = self.mtp(pfx, mtp_fc)
         builder.build()
+
+    # ------------------------------------------------------------------
+    # MTP draft head (M4)
+    # ------------------------------------------------------------------
+
+    def mtp(self, pfx, fc):
+        """Build the MTP weight tree: fc + 3 norms + 1 decoder layer.
+
+        Shares the target's `tok_embeddings`/`lm_head` (owned by ModelWeight);
+        only the head-specific tensors are built here.
+        """
+        b = Builder(_tm.MtpWeightConfig(), self._ctx)
+        b.tp = self._model_tp
+
+        b._add_linear('fc', fc, SplitSide.OUTPUT)
+
+        b.pre_fc_norm_embedding = self.norm(
+            pfx + 'mtp.pre_fc_norm_embedding', zero_centered=True)
+        b.pre_fc_norm_hidden = self.norm(
+            pfx + 'mtp.pre_fc_norm_hidden', zero_centered=True)
+        b.norm = self.norm(pfx + 'mtp.norm', zero_centered=True)
+
+        layers = ModuleListBuilder(ModuleListConfig(), self._ctx)
+        lp = pfx + 'mtp.layers.0'
+        d = DecoderLayerBuilder(DecoderLayerConfig(), self._ctx)
+        d.attention = self.attn(lp + 'self_attn')
+        d.feed_forward = self.ffn(
+            lp + 'mlp', self.cfg.intermediate_size, tp=self._mlp_tp)
+        d.attention_norm = self.norm(
+            lp + 'input_layernorm', zero_centered=True)
+        d.ffn_norm = self.norm(
+            lp + 'post_attention_layernorm', zero_centered=True)
+        layers[0] = d.build()
+        b.layers = layers.build()
+
+        return b.build()
 
     # ------------------------------------------------------------------
     # Attention / linear-attention factories

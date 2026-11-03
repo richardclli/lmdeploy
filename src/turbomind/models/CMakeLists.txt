@@ -13,6 +13,7 @@ add_library(models STATIC
         delta_net_weight.cc
         decoder_layer_weight.cc
         model_weight.cc
+        mtp_weight.cc
         model_root.cc
         vision_model.cc
         qwenvit/qwenvit_kernels.cu
