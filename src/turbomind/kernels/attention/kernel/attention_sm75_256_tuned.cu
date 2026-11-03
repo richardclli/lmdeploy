@@ -12,7 +12,8 @@
 // Registered *before* `attention_sm75_256.cu` in the CMake source order; the
 // prefill path in Registry::Find returns the first match, so an active variant
 // wins and the stock kernel is used otherwise. No `AttnDesc`/`Registry::Find`
-// behavior is changed.
+// behavior is changed. `TM_ATTN_SM75` unset => t32q128 (default);
+// `TM_ATTN_SM75=stock|off|0` => stock kernel; `TM_ATTN_SM75=t32q64` => alt.
 
 #include "src/turbomind/kernels/attention/attention_universal.h"
 #include "src/turbomind/kernels/attention/cta_map.h"
@@ -43,9 +44,17 @@ struct Tuned {
                                   Causal>;
 };
 
+// Selected variant: `TM_ATTN_SM75` unset => t32q128 (default). "stock" / "off" /
+// "0" restores the stock kernel; "t32q64" opts into the smaller-Q variant.
 const char* selector()
 {
     return std::getenv("TM_ATTN_SM75");
+}
+
+bool is_stock()
+{
+    const char* s = selector();
+    return s && (std::strcmp(s, "stock") == 0 || std::strcmp(s, "off") == 0 || std::strcmp(s, "0") == 0);
 }
 
 bool selected(const char* name)
@@ -64,9 +73,9 @@ Registrar reg_sm75_256_t32q64([](Collector& c) {
     }
 });
 
-// CTA_Q=128, CTA_S=32: 64 KB smem (1 CTA/SM), ~0.3 KB causal spill.
+// CTA_Q=128, CTA_S=32: 64 KB smem (1 CTA/SM), ~0.3 KB causal spill. Default.
 Registrar reg_sm75_256_t32q128([](Collector& c) {
-    if (selected("t32q128")) {
+    if (!is_stock() && !selected("t32q64")) {
         c.add<Tuned<128, 32>::KT<half>>();
         c.add<Tuned<128, 32>::KT<half, false>>();
     }
