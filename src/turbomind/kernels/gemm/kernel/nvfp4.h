@@ -37,6 +37,7 @@ inline std::optional<WeightBridge> supports_nvfp4(const DataFormat& format, bool
 template<class Arch, Order WeightOrder, uint32_t WeightPack, Order QParamOrder, uint32_t QParamPack>
 void pack_nvfp4(LinearWeight& linear, cudaStream_t stream)
 {
+    // Dense layout: E2M1 weights are the packed B operand, half scales are V.
     PackWeight(linear, GetImpl<Arch, WeightOrder, WeightPack, uint16_t, uint4_t>(), stream);
     PackQParams(
         linear, GetImpl<Arch, QParamOrder, QParamPack, uint16_t, uint16_t>(), QuantDesc{QuantType::kK, 16}, stream);
