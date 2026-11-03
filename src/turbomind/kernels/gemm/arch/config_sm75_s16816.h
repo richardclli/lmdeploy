@@ -177,6 +177,32 @@ struct Config_MXF4 {
         GroupAxis>::template Type<Config_, Stages, Raster, PolicyA, PolicyB, SplitK, 32, 1, EpiM, EpiN>::Kernel;
 };
 
+// Dense NVFP4 (E2M1 weights as the A operand, per-group half scales as U).
+// Mirrors Config_MXF4 but with a plain half scale (group 16) instead of the
+// e8m0 uint8 scale, so the existing E2M1 dequant path is reused unchanged.
+struct Config_NVFP4 {
+    template<class Config_,
+             int   Stages,
+             Order Raster,
+             class PolicyA,
+             class PolicyB,
+             bool SplitK,
+             int  EpiM      = -1,
+             int  EpiN      = -1,
+             int  GroupAxis = -1>
+    using Type = typename Sm75_s16816<
+        kColMajor,
+        Operand_A_Pack<fp4_e2m1_t, kColMajor, 1>,
+        Transform_HMMA_16816<0, 1>,
+        Operand_UV_Pack<uint16_t, false>,
+        Operand_B<half_t, kRowMajor>,
+        Transform_Default,
+        VoidOperand,
+        kColMajor,
+        half_t,
+        GroupAxis>::template Type<Config_, Stages, Raster, PolicyA, PolicyB, SplitK, 16, 1, EpiM, EpiN>::Kernel;
+};
+
 struct Config_E4M3 {
     template<class Config_,
              int   Stages,
