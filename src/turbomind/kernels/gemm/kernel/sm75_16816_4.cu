@@ -47,9 +47,9 @@ const Family u4_g_128{11, 189, kHalf, kHalf, 128, 8, 1, 1, true, true, supports_
 const Family mxfp4{12, 190, kHalf, kHalf, 32, 8, 1, 1, true, true, supports_mxfp4, mxfp4_packer};
 
 constexpr auto nvfp4_packer =
-    pack_nvfp4<Sm75, kColMajor, HMMA_16816 | OPERAND_A | 1, kColMajor, HMMA_16816 | OPERAND_U | 1>;
+    pack_nvfp4<Sm75, kColMajor, HMMA_16816 | OPERAND_B | 1, kColMajor, HMMA_16816 | OPERAND_V | 1>;
 
-// Dense NVFP4: E2M1 weights (A) + per-group-16 half scales (U), flat layout.
+// Dense NVFP4: E2M1 weights (B) + per-group-16 half scales (V), flat layout.
 const Family nvfp4{13, 190, kHalf, kHalf, 16, 8, 1, 1, true, false, supports_nvfp4, nvfp4_packer};
 
 // NVCC requires defaults on the template-template parameter.
@@ -120,28 +120,6 @@ void register_mxfp4(Collector& c)
     add<K<_64x16x64_4x1x1, 2, kColMajor, S, D, true, -1, -1, 1>>(c);
 }
 
-// NVFP4 uses the same tiling family as MXFP4 but a flat (dense) layout
-// (GroupAxis = -1) instead of the grouped/MoE layout.
-template<template<class Config_,
-                  int   Stages,
-                  Order Raster,
-                  class PolicyA,
-                  class PolicyB,
-                  bool SplitK,
-                  int  EpiM      = -1,
-                  int  EpiN      = -1,
-                  int  GroupAxis = -1>
-         class K>
-void register_nvfp4(Collector& c)
-{
-    add<K<_128x128x32_4x1x1, 2, kColMajor, D, D, true, 128, 64, -1>>(c);
-    add<K<_128x64x32_4x1x1, 2, kColMajor, D, D, true, -1, -1, -1>>(c);
-    add<K<_128x32x32_4x1x1, 2, kColMajor, S, D, true, -1, -1, -1>>(c);
-    add<K<_128x16x32_4x1x1, 2, kColMajor, S, D, true, -1, -1, -1>>(c);
-    add<K<_128x16x64_4x1x1, 2, kColMajor, S, D, true, -1, -1, -1>>(c);
-    add<K<_64x16x64_4x1x1, 2, kColMajor, S, D, true, -1, -1, -1>>(c);
-}
-
 using U4_D_32  = Config_U4_d<32>;
 using U4_G_32  = Config_U4_g<32>;
 using U4_D_128 = Config_U4_d<128>;
@@ -155,7 +133,9 @@ Registrar reg[]{
     {u4_d_128, register_u4_d<U4_D_128::Type>},
     {u4_g_128, register_u4_g<U4_G_128::Type>},
     {mxfp4, register_mxfp4<MXFP4::Type>},
-    {nvfp4, register_nvfp4<NVFP4::Type>},
+    // Dense NVFP4 reuses the dense u4 tiling (flat, group_axis = -1), which
+    // covers the full decode/prefill M range.
+    {nvfp4, register_u4_d<NVFP4::Type>},
 };
 }  // namespace
 
