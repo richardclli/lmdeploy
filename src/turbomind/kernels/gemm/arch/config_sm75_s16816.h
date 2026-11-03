@@ -194,7 +194,7 @@ struct Config_NVFP4 {
         Operand_A<half, kRowMajor>,
         Transform_Default,
         VoidOperand,
-        Operand_B_Pack<fp4_e2m1_t, kColMajor, 1>,
+        Operand_B_Pack<fp4_e2m1_t, kRowMajor, 1>,
         Transform_HMMA_16816<1, 0>,
         Operand_UV_Pack<uint16_t, true>,
         kRowMajor,
