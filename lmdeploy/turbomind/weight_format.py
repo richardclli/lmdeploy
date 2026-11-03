@@ -462,6 +462,66 @@ class MXFP4Format(WeightFormat):
         return PackedTensor(tensor, None, None)
 
 
+class NVFP4Format(WeightFormat):
+    """NVFP4 (E2M1 codes, group-16 ``float8_e4m3`` scales, per-tensor global).
+
+    weights ``.weight_packed`` (uint8, two E2M1 codes per byte), scales
+    ``.weight_scale`` (``float8_e4m3fn``, one per 16 input values) and a
+    per-tensor ``.weight_global_scale`` (float32). Activation scale
+    (``input_global_scale``) is intentionally ignored (W4A16).
+    """
+
+    name = 'nvfp4'
+    suffix_map = {
+        '.weight_packed': 'weight',
+        '.weight_scale': 'scales',
+        '.weight_global_scale': 'global_scale',
+        '.bias': 'bias',
+    }
+    weight_dtype = _tm.DataType.TYPE_FP4_E2M1
+    scales_dtype = _tm.DataType.TYPE_FP8_E4M3
+    zeros_dtype = _tm.DataType.TYPE_INVALID
+
+    def __init__(self, *, block_in: int = 16):
+        if block_in != 16:
+            raise ValueError(f'NVFP4 requires group_size 16, got {block_in}')
+        super().__init__(block_in=block_in, block_out=None)
+
+    def accepts(self, available: dict[str, Tensor]) -> bool:
+        weight = available.get('.weight_packed')
+        scales = available.get('.weight_scale')
+        global_scale = available.get('.weight_global_scale')
+        if weight is None or weight.dtype != torch.uint8:
+            return False
+        if scales is None or scales.dtype != torch.float8_e4m3fn:
+            return False
+        if global_scale is None:
+            return False
+        # Every byte holds two 4-bit codes; every group of 16 shares one scale.
+        return weight.numel() * 2 == scales.numel() * self.block_in
+
+    def normalize(self, x: Tensor, kind: str) -> Tensor:
+        if kind == 'weight':
+            # (out, in/2) uint8 -> expand to (in, out) codes for TM logical layout.
+            xs = _get_u4_slices(x, torch.uint8)
+            x = torch.stack(xs, dim=-1).flatten(start_dim=-2)
+            return x.t()
+        if kind == 'scales':
+            return x.t() if x.dim() >= 2 else x
+        # global_scale is per-tensor: leave as-is.
+        return x
+
+    def pack(self, tensor: Tensor, kind: str) -> PackedTensor:
+        if kind == 'weight' and tensor.dtype == torch.uint8:
+            return PackedTensor(pack_u4_row(tensor), list(tensor.shape), self.weight_dtype)
+        if kind == 'scales':
+            # e4m3 bytes are stored verbatim in a FP8_E4M3 slot.
+            return PackedTensor(tensor.view(torch.uint8), None, self.scales_dtype)
+        if kind == 'global_scale':
+            return PackedTensor(tensor.to(torch.float32), None, _tm.DataType.TYPE_FP32)
+        return PackedTensor(tensor, None, None)
+
+
 # ---------------------------------------------------------------------------
 # Resolver
 # ---------------------------------------------------------------------------
