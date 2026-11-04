@@ -10,6 +10,7 @@
 #include "src/turbomind/kernels/speculative_sequence_kernels.h"
 #include "src/turbomind/models/model_weight.h"
 #include "src/turbomind/models/speculative/hidden_state_tap.h"
+#include "src/turbomind/utils/spec_probe.h"
 
 namespace turbomind {
 
@@ -92,6 +93,19 @@ void FixedChainSpeculativeModel::RunDraft(int phase, const DraftContext& ctx, Te
     const int candidate_count    = chain.draft_extension_query_count;
     const int k                  = policy_.max_proposals();
     const cudaStream_t stream    = core::Context::stream().handle();
+    const int probe_round        = SpecProbeEnabled() ? g_spec_probe_round.fetch_add(1) : -1;
+
+    auto dump_draft_logits = [&](const Tensor& logits, int pos) {
+        SpecProbeDump("draft.bin",
+                      probe_round,
+                      pos,
+                      logits.raw_data(),
+                      candidate_count,
+                      static_cast<int>(logits.shape(1)),
+                      byte_size(logits.dtype(), 1),
+                      logits.dtype() == DataType::kHalf ? "f16" : "bf16",
+                      stream);
+    };
 
     AttentionForwardMetadata refresh_metadata{};
     refresh_metadata.decode    = chain.refresh_decode;
@@ -156,6 +170,7 @@ void FixedChainSpeculativeModel::RunDraft(int phase, const DraftContext& ctx, Te
         const auto& hw     = HeadModel().weights();
         Tensor      logits = ctx.head_storage.slice({0, 0}, {candidate_count, hw.vocab_size_padded});
         logits            = HeadModel().Logits(out.selected_hidden, logits, draft_env);
+        dump_draft_logits(logits, 0);
         invokeDraftArgmaxAndStoreToken(logits,
                                        data.draft_proposal_ids.data(),
                                        ctx.request_token_ids_ptrs,
@@ -214,6 +229,7 @@ void FixedChainSpeculativeModel::RunDraft(int phase, const DraftContext& ctx, Te
             const auto& hw     = HeadModel().weights();
             Tensor      logits = ctx.head_storage.slice({0, 0}, {candidate_count, hw.vocab_size_padded});
             logits            = HeadModel().Logits(out.selected_hidden, logits, extension_env);
+            dump_draft_logits(logits, i + 1);
             invokeDraftArgmaxAndStoreToken(logits,
                                            data.draft_proposal_ids.data(),
                                            ctx.request_token_ids_ptrs,

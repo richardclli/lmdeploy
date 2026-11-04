@@ -18,6 +18,7 @@
 #include "src/turbomind/models/llama/llama_kernels.h"
 #include "src/turbomind/models/speculative/speculative_model.h"
 #include "src/turbomind/utils/cuda_utils.h"
+#include "src/turbomind/utils/spec_probe.h"
 
 namespace turbomind {
 
@@ -183,6 +184,17 @@ void TargetVerification::ProcessTargetBlock(int phase, int position_count, const
     if (rows == 0) {
         return;
     }
+
+    // D6-P0 probe: dump the raw target logits for the positions being verified.
+    SpecProbeDump("target.bin",
+                  g_spec_probe_round.load() - 1,
+                  -1,
+                  target_logits.raw_data(),
+                  rows,
+                  static_cast<int>(target_logits.shape(1)),
+                  byte_size(target_logits.dtype(), 1),
+                  target_logits.dtype() == DataType::kHalf ? "f16" : "bf16",
+                  stream);
 
     Tensor_<float> probabilities = empty_like(target_logits, kFloat32);
     invokeCastFloat2D(target_logits, probabilities, stream);
