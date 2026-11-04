@@ -32,6 +32,9 @@ void UnifiedDecoder::Run(BatchOp op, int phase, TensorMap& env)
     if (linear_attn_layer_) {
         linear_attn_layer_->Run(op, phase, env);
     }
+    if (mtp_attn_layer_) {
+        mtp_attn_layer_->Run(op, phase, env);
+    }
 }
 
 UnifiedDecoder::UnifiedDecoder(CacheRegistry&     registry,
@@ -113,6 +116,27 @@ UnifiedDecoder::UnifiedDecoder(CacheRegistry&     registry,
                                                                   engine,
                                                                   ctx,
                                                                   phases);
+    }
+
+    // MTP draft head (M4.2): a second, single-layer attention + FFN executor
+    // built from ModelWeight::mtp->layer(0). Its KV is registered through the
+    // same CacheRegistry, so it gets its own block offset/category.
+    if (model_weight.mtp) {
+        if (auto* m = model_weight.mtp->layer(0)) {
+            if (m->attention) {
+                mtp_attn_weights_.push_back(m->attention.get());
+            }
+            if (m->feed_forward) {
+                mtp_ffn_weights_.push_back(m->feed_forward.get());
+            }
+        }
+        if (!mtp_attn_weights_.empty()) {
+            mtp_attn_layer_ =
+                std::make_unique<UnifiedAttentionLayer>(mtp_attn_weights_, registry, engine, ctx, phases);
+        }
+        if (!mtp_ffn_weights_.empty()) {
+            mtp_ffn_layer_ = std::make_unique<LlamaFfnLayer>(ctx);
+        }
     }
 
     TM_CHECK(!(moe_weights.empty() && engine.ep_size > 1)) << "Dense model is not supported with ep_size > 1";

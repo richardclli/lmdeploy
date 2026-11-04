@@ -12,6 +12,8 @@ namespace turbomind {
 
 class ModelWeight;
 class DecoderLayerWeight;
+class AttentionWeight;
+class FfnWeight;
 class CacheRegistry;
 
 class UnifiedDecoder {
@@ -55,6 +57,13 @@ private:
     std::unique_ptr<GatedDeltaNetLayer>    linear_attn_layer_;
     std::unique_ptr<LlamaFfnLayer>         ffn_layer_;
     std::unique_ptr<MoeFfnLayer>           moe_ffn_layer_;
+
+    // MTP draft head (optional): separate attention + FFN execution layers,
+    // built from ModelWeight::mtp->layer(0).
+    std::vector<AttentionWeight*>          mtp_attn_weights_;
+    std::vector<FfnWeight*>                mtp_ffn_weights_;
+    std::unique_ptr<UnifiedAttentionLayer> mtp_attn_layer_;
+    std::unique_ptr<LlamaFfnLayer>         mtp_ffn_layer_;
 
     void AllreduceResidualRMSnorm(Tensor&       hidden_states,
                                   Tensor&       residual,
