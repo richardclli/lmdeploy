@@ -52,6 +52,13 @@ struct Arguments {
     int          quant_policy{};  // 0 = fp16 KV, 4 = int4 KV
     DataType     data_type{};
     cudaStream_t stream{};
+
+    // Tree verification (optional). When set, draft query node `p` attends to
+    // context + its ancestors (instead of the causal `keys <= p`). Layout:
+    // node_parent[request * node_stride + p] = parent node id, -1 = root.
+    // Nodes use the same index space as the draft keys (0 .. query_length-1).
+    const int* node_parent{};
+    int        node_stride{};
 };
 
 inline bool IsSm75(const Arguments& arguments)

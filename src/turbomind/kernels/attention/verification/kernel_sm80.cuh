@@ -300,8 +300,30 @@ struct VerificationAttentionMainloop {
                 const int absolute_key   = current_key_begin + key_in_tile;
                 const int last_valid     = history_length + query_position;
                 const int first_valid    = max(0, last_valid - arguments.window_size + 1);
+                bool      key_visible;
+                if (arguments.node_parent) {
+                    // Tree verification: context keys are always visible; a draft
+                    // key j is visible to node p iff j is an ancestor-or-self of p.
+                    if (absolute_key < history_length) {
+                        key_visible = true;
+                    }
+                    else {
+                        const int j = absolute_key - history_length;
+                        key_visible = false;
+                        for (int cur = query_position; cur != -1;
+                             cur = arguments.node_parent[request * arguments.node_stride + cur]) {
+                            if (cur == j) {
+                                key_visible = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+                else {
+                    key_visible = absolute_key >= first_valid && absolute_key <= last_valid;
+                }
                 const bool valid = query_position < query_length && head_in_group < query_group_size
-                                   && absolute_key >= first_valid && absolute_key <= last_valid;
+                                   && key_visible;
                 const float score = valid ? score_fragment(i) * arguments.qk_scale_log2 :
                                             -CUDART_INF_F;
                 score_fragment(i) = score;
