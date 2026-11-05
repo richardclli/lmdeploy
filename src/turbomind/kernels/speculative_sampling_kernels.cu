@@ -239,29 +239,29 @@ __global__ void VerifyTargetBlock(VerifyTargetBlockParams p)
     }
     else if (p.node_stride > 0) {
         // ----- M13 tree walk -------------------------------------------------
-        // Follow ancestors from the context root. At each level verify the
-        // candidate draft children; the first whose draft token is accepted
-        // extends the path. The first non-matching child contributes its target
-        // sample as the replacement token and ends the walk. A fully accepted
-        // chain is followed by its bonus-leaf row.
-        int  cur          = -1;
-        bool reached_leaf = false;
+        // Verification row `q` predicts the token at node `q` (row 0 = context
+        // predicts the root children). Node `p` is therefore verified against
+        // row `parent[p] + 1` (row 0 for roots); all children of the current
+        // accepted node `cur` share row `rowcur = cur < 0 ? 0 : cur + 1`.
+        // Follow ancestors from the context root, accept the first matching
+        // child; stop at the first level with no match (its row's sample is the
+        // replacement/bonus) or after a leaf (bonus = row `cur + 1`).
+        int cur = -1;
         while (continue_verification) {
-            int next        = -1;
-            int replacement = -1;
+            const int rowcur = cur < 0 ? 0 : cur + 1;
+            const int flat   = rowcur * p.generation_count + g;
+            if (!p.logits_active[flat]) {
+                break;
+            }
+            const float* row = p.probabilities + flat * p.probability_stride;
+            const int*   ids = p.probability_token_ids + flat * p.token_id_stride;
 
+            int next = -1;
             for (int node = 0; node < p.node_count; ++node) {
                 if (p.node_parent[node] != cur) {
                     continue;
                 }
-                const int flat = node * p.generation_count + g;
-                if (!p.logits_active[flat]) {
-                    continue;
-                }
-                const float* row   = p.probabilities + flat * p.probability_stride;
-                const int*   ids   = p.probability_token_ids + flat * p.token_id_stride;
-                const int    draft = p.verification_draft_ids[node * p.draft_row_stride + g];
-
+                const int draft = p.verification_draft_ids[node * p.draft_row_stride + g];
                 VerifyOneProcessedDraft<BlockSize>(row,
                                                    ids,
                                                    p.kept_count[flat],
@@ -272,9 +272,6 @@ __global__ void VerifyTargetBlock(VerifyTargetBlockParams p)
                                                    accepted,
                                                    storage);
                 __syncthreads();
-                if (replacement < 0) {
-                    replacement = node;
-                }
                 if (accepted) {
                     next = node;
                     break;
@@ -298,14 +295,33 @@ __global__ void VerifyTargetBlock(VerifyTargetBlockParams p)
                         break;
                     }
                 }
-                if (!has_child) {
-                    reached_leaf = true;
-                    break;
+                if (has_child) {
+                    continue;
                 }
+
+                // Leaf reached: the bonus token is predicted by row `cur + 1`.
+                const int bonus_row = cur + 1;
+                if (bonus_row < p.position_count) {
+                    const int bflat = bonus_row * p.generation_count + g;
+                    if (p.logits_active[bflat]) {
+                        const float* brow = p.probabilities + bflat * p.probability_stride;
+                        const int*   bids = p.probability_token_ids + bflat * p.token_id_stride;
+                        SampleOneProcessedDistribution<BlockSize>(
+                            brow, bids, p.kept_count[bflat], random_state, selected, storage);
+                        __syncthreads();
+                        if (threadIdx.x == 0) {
+                            p.request_token_ids_ptrs[b][p.entry_sequence_length[b] + span_len] = selected;
+                            p.selected_span_ids[b * p.selected_span_stride + span_len]         = selected;
+                            ++span_len;
+                        }
+                    }
+                }
+                break;
             }
             else {
-                // No child matched: the first candidate's sample is the replacement.
-                if (replacement >= 0 && threadIdx.x == 0) {
+                // No child matched: this row's sample is the correct next token
+                // (the replacement); the walk ends.
+                if (threadIdx.x == 0) {
                     p.request_token_ids_ptrs[b][p.entry_sequence_length[b] + span_len] = selected;
                     p.selected_span_ids[b * p.selected_span_stride + span_len]         = selected;
                     ++span_len;
@@ -313,31 +329,6 @@ __global__ void VerifyTargetBlock(VerifyTargetBlockParams p)
                 __syncthreads();
                 continue_verification = false;
                 break;
-            }
-        }
-
-        if (reached_leaf) {
-            int bonus_row = -1;
-            for (int node = p.node_count; node < p.node_stride; ++node) {
-                if (p.node_parent[node] == cur) {
-                    bonus_row = node;
-                    break;
-                }
-            }
-            if (bonus_row >= 0) {
-                const int flat = bonus_row * p.generation_count + g;
-                if (p.logits_active[flat]) {
-                    const float* row = p.probabilities + flat * p.probability_stride;
-                    const int*   ids = p.probability_token_ids + flat * p.token_id_stride;
-                    SampleOneProcessedDistribution<BlockSize>(
-                        row, ids, p.kept_count[flat], random_state, selected, storage);
-                    __syncthreads();
-                    if (threadIdx.x == 0) {
-                        p.request_token_ids_ptrs[b][p.entry_sequence_length[b] + span_len] = selected;
-                        p.selected_span_ids[b * p.selected_span_stride + span_len]         = selected;
-                        ++span_len;
-                    }
-                }
             }
         }
     }
