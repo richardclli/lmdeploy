@@ -6,26 +6,51 @@
 
 namespace turbomind {
 
-TreePolicy::TreePolicy(int chain_count, int depth): chain_count_{chain_count}, depth_{depth}
+TreePolicy TreePolicy::DisjointChains(int chain_count, int depth)
 {
-    if (chain_count_ <= 0 || depth_ <= 0) {
+    if (chain_count <= 0 || depth <= 0) {
         throw std::invalid_argument("TreePolicy: chain_count and depth must be positive");
     }
-    const int v = node_count();
-    parent_.resize(v + 1);
-    for (int m = 0; m < chain_count_; ++m) {
-        for (int j = 0; j < depth_; ++j) {
-            parent_[m * depth_ + j] = (j == 0) ? -1 : m * depth_ + j - 1;
+    TreePolicy p;
+    p.node_count_  = chain_count * depth;
+    p.depth_       = depth;
+    p.width_       = chain_count;
+    p.tail_branch_ = false;
+    p.parent_.resize(p.node_count_ + 1);
+    for (int m = 0; m < chain_count; ++m) {
+        for (int j = 0; j < depth; ++j) {
+            p.parent_[m * depth + j] = (j == 0) ? -1 : m * depth + j - 1;
         }
     }
-    // Trailing bonus query row: causal over the last chain (anchor-equivalent
-    // to the fixed chain when chain_count_ == 1).
-    parent_[v] = v - 1;
+    p.parent_[p.node_count_] = p.node_count_ - 1;  // bonus row
+    return p;
+}
+
+TreePolicy TreePolicy::TailBranch(int depth, int width)
+{
+    if (depth <= 1 || width <= 0) {
+        throw std::invalid_argument("TreePolicy: tail branch needs depth>1 and width>0");
+    }
+    TreePolicy p;
+    const int prefix = depth - 1;  // chain nodes 0..prefix-1
+    p.node_count_    = prefix + width;
+    p.depth_         = depth;
+    p.width_         = width;
+    p.tail_branch_   = true;
+    p.parent_.resize(p.node_count_ + 1);
+    for (int j = 0; j < prefix; ++j) {
+        p.parent_[j] = (j == 0) ? -1 : j - 1;
+    }
+    for (int k = 0; k < width; ++k) {
+        p.parent_[prefix + k] = prefix - 1;  // siblings share the last prefix node
+    }
+    p.parent_[p.node_count_] = prefix - 1;  // bonus row (derived from winner in the walk)
+    return p;
 }
 
 int TreePolicy::max_proposals() const
 {
-    return node_count();
+    return node_count_;
 }
 
 int TreePolicy::token_row_tail() const
@@ -35,14 +60,12 @@ int TreePolicy::token_row_tail() const
 
 RoundExtent TreePolicy::Extent(const RoundRequest&) const
 {
-    const int v = node_count();
-    return {v + 1, v - 1};
+    return {node_count_ + 1, node_count_ - 1};
 }
 
 std::optional<BootstrapExtent> TreePolicy::Bootstrap(int prompt_len) const
 {
-    const int v = node_count();
-    return BootstrapExtent{prompt_len + v - 1, prompt_len + 2 * v};
+    return BootstrapExtent{prompt_len + node_count_ - 1, prompt_len + 2 * node_count_};
 }
 
 }  // namespace turbomind

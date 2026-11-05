@@ -35,9 +35,17 @@ FixedChainSpeculativeModel::FixedChainSpeculativeModel(const SpeculativeModelArg
 
     // M13 spike: fixed-shape tree verification via TM_SPEC_TREE="<chains>,<depth>".
     if (const char* spec_tree = std::getenv("TM_SPEC_TREE")) {
-        int chains = 0, depth = 0;
-        if (std::sscanf(spec_tree, "%d,%d", &chains, &depth) == 2 && chains > 0 && depth > 0) {
-            tree_policy_ = std::make_unique<TreePolicy>(chains, depth);
+        int a = 0, b = 0;
+        if (std::sscanf(spec_tree, "tail,%d,%d", &a, &b) == 2 && a > 1 && b > 0) {
+            tree_policy_ = std::make_unique<TreePolicy>(TreePolicy::TailBranch(a, b));
+        }
+        else if (std::sscanf(spec_tree, "chains,%d,%d", &a, &b) == 2 && a > 0 && b > 0) {
+            tree_policy_ = std::make_unique<TreePolicy>(TreePolicy::DisjointChains(a, b));
+        }
+        else if (std::sscanf(spec_tree, "%d,%d", &a, &b) == 2 && a > 0 && b > 0) {
+            tree_policy_ = std::make_unique<TreePolicy>(TreePolicy::DisjointChains(a, b));
+        }
+        if (tree_policy_) {
             policy_ptr_  = tree_policy_.get();
             node_parent_host_ = tree_policy_->parent();
             if (node_parent_host_.size() <= verification_attention::Arguments::kMaxTreeNode) {
@@ -45,7 +53,7 @@ FixedChainSpeculativeModel::FixedChainSpeculativeModel(const SpeculativeModelArg
                     g_spec_node_parent = node_parent_host_.data();
                     g_spec_node_stride = static_cast<int>(node_parent_host_.size());
                 }
-                std::fprintf(stderr, "[TM][spec_tree] enabled chains=%d depth=%d nodes=%d stride=%zu\n", chains, depth, tree_policy_->node_count(), node_parent_host_.size());
+                std::fprintf(stderr, "[TM][spec_tree] enabled nodes=%d stride=%zu tail=%d\n", tree_policy_->node_count(), node_parent_host_.size(), (int)tree_policy_->is_tail_branch());
             }
             else {
                 std::fprintf(stderr, "[TM][spec_tree] disabled: %zu nodes > kMaxTreeNode\n", node_parent_host_.size());
