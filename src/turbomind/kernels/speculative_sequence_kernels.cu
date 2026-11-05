@@ -84,7 +84,8 @@ __global__ void BuildDraftExtensionKeyOffsetsKernel(int*       k_offsets,
                                                     const int* entry_sequence_length,
                                                     const int* accept_len,
                                                     int        batch_size,
-                                                    int        extension_index)
+                                                    int        extension_index,
+                                                    int        chain_offset)
 {
     using BlockScan = cub::BlockScan<int, BLOCK_SIZE>;
     __shared__ typename BlockScan::TempStorage scan_storage;
@@ -104,7 +105,7 @@ __global__ void BuildDraftExtensionKeyOffsetsKernel(int*       k_offsets,
             const int q_width = q_offsets[b + 1] - q_offsets[b];
 
             if (q_width == 1) {
-                key_len = entry_sequence_length[b] + accept_len[b] + extension_index;
+                key_len = entry_sequence_length[b] + accept_len[b] + chain_offset + extension_index;
             }
         }
 
@@ -129,12 +130,13 @@ void invokeBuildDraftExtensionKeyOffsets(int*         k_offsets,
                                          const int*   accept_len,
                                          int          batch_size,
                                          int          extension_index,
+                                         int          chain_offset,
                                          cudaStream_t stream)
 {
     constexpr int block_size = 256;
 
     BuildDraftExtensionKeyOffsetsKernel<block_size><<<1, block_size, 0, stream>>>(
-        k_offsets, q_offsets, entry_sequence_length, accept_len, batch_size, extension_index);
+        k_offsets, q_offsets, entry_sequence_length, accept_len, batch_size, extension_index, chain_offset);
 }
 
 __global__ void build_draft_tree_base(int* tree_base, const int* entry_sequence_length, const int* accept_len, int batch_size)
@@ -387,7 +389,8 @@ __global__ void DraftArgmaxAndStoreTokenKernel(const T*    logits,
                                                const int*  entry_sequence_length,
                                                const int*  accept_len,
                                                int         batch_size,
-                                               int         proposal_index)
+                                               int         proposal_index,
+                                               int         chain_offset)
 {
     const int b = blockIdx.x;
 
@@ -434,7 +437,7 @@ __global__ void DraftArgmaxAndStoreTokenKernel(const T*    logits,
     if (threadIdx.x == 0) {
         proposal_ids[c] = best.token_id;
 
-        const int token_position = entry_sequence_length[b] + accept_len[b] + proposal_index;
+        const int token_position = entry_sequence_length[b] + accept_len[b] + chain_offset + proposal_index;
 
         token_ids_ptrs[b][token_position] = best.token_id;
     }
@@ -450,6 +453,7 @@ void invokeDraftArgmaxAndStoreToken(const Tensor& logits,
                                     int           batch_size,
                                     int           candidate_count,
                                     int           proposal_index,
+                                    int           chain_offset,
                                     int           vocab_size,
                                     cudaStream_t  stream)
 {
@@ -472,7 +476,8 @@ void invokeDraftArgmaxAndStoreToken(const Tensor& logits,
                                                                                              entry_sequence_length,
                                                                                              accept_len,
                                                                                              batch_size,
-                                                                                             proposal_index);
+                                                                                             proposal_index,
+                                                                                             chain_offset);
     };
 
     TM_DISPATCH_DTYPES(logits.dtype(), dispatch, half_t, bfloat16_t);
@@ -506,6 +511,132 @@ void invokeAdvanceSequenceByAcceptedSpan(
 
     AdvanceSequenceByAcceptedSpan<<<blocks, threads, 0, stream>>>(
         sequence_length, accept_len, accepted_draft_count, batch_size);
+}
+
+// M13 authoring: top-M roots from the refresh distribution, one per chain.
+template<class T, int BLOCK_SIZE, int MAX_M>
+__global__ void DraftTopMRootKernel(const T*    logits,
+                                    int         logits_stride,
+                                    int         vocab_size,
+                                    int*        roots,
+                                    int* const* token_ids_ptrs,
+                                    const int*  extension_q_offsets,
+                                    const bool* candidate_active,
+                                    const int*  entry_sequence_length,
+                                    const int*  accept_len,
+                                    int         batch_size,
+                                    int         chain_count,
+                                    int         depth)
+{
+    const int b = blockIdx.x;
+    if (b >= batch_size) {
+        return;
+    }
+
+    const int candidate_begin = extension_q_offsets[b];
+    const int candidate_end   = extension_q_offsets[b + 1];
+    if (candidate_begin == candidate_end) {
+        return;
+    }
+    const int c = candidate_begin;
+
+    const bool active = candidate_active[c];
+
+    const T* row = logits + static_cast<ssize_t>(c) * logits_stride;
+
+    __shared__ int selected_idx[MAX_M];
+
+    for (int m = 0; m < chain_count; ++m) {
+        DraftArgMax local{-CUDART_INF_F, INT_MAX};
+        if (active) {
+            for (int token_id = threadIdx.x; token_id < vocab_size; token_id += BLOCK_SIZE) {
+                bool excluded = false;
+                for (int k = 0; k < m; ++k) {
+                    if (selected_idx[k] == token_id) {
+                        excluded = true;
+                        break;
+                    }
+                }
+                if (excluded) {
+                    continue;
+                }
+                float value = static_cast<float>(row[token_id]);
+                if (isnan(value)) {
+                    value = -CUDART_INF_F;
+                }
+                local = DraftArgMaxOp{}(local, DraftArgMax{value, token_id});
+            }
+        }
+        using BlockReduce = cub::BlockReduce<DraftArgMax, BLOCK_SIZE>;
+        __shared__ typename BlockReduce::TempStorage storage;
+        const DraftArgMax best = BlockReduce(storage).Reduce(local, DraftArgMaxOp{});
+        if (threadIdx.x == 0) {
+            const int token           = active ? best.token_id : 0;
+            selected_idx[m]           = token;
+            roots[m * batch_size + b] = token;
+            if (active) {
+                const int token_position = entry_sequence_length[b] + accept_len[b] + m * depth;
+                token_ids_ptrs[b][token_position] = token;
+            }
+        }
+        __syncthreads();
+    }
+}
+
+void invokeDraftTopMRoot(const Tensor& logits,
+                         int*          roots,
+                         int* const*   token_ids_ptrs,
+                         const int*    extension_q_offsets,
+                         const bool*   candidate_active,
+                         const int*    entry_sequence_length,
+                         const int*    accept_len,
+                         int           batch_size,
+                         int           vocab_size,
+                         int           chain_count,
+                         int           depth,
+                         cudaStream_t  stream)
+{
+    if (batch_size == 0 || chain_count == 0) {
+        return;
+    }
+    constexpr int block_size = 256;
+    constexpr int max_m      = 24;
+    const int     logits_stride = static_cast<int>(logits.shape(1));
+
+    auto dispatch = [&](auto t) {
+        using T = decltype(t);
+        DraftTopMRootKernel<T, block_size, max_m><<<batch_size, block_size, 0, stream>>>(logits.data<T>(),
+                                                                                         logits_stride,
+                                                                                         vocab_size,
+                                                                                         roots,
+                                                                                         token_ids_ptrs,
+                                                                                         extension_q_offsets,
+                                                                                         candidate_active,
+                                                                                         entry_sequence_length,
+                                                                                         accept_len,
+                                                                                         batch_size,
+                                                                                         chain_count,
+                                                                                         depth);
+    };
+    TM_DISPATCH_DTYPES(logits.dtype(), dispatch, half_t, bfloat16_t);
+}
+
+__global__ void DraftSelectRootKernel(int* proposal_ids, const int* roots, int batch_size, int chain_index)
+{
+    const int b = blockIdx.x * blockDim.x + threadIdx.x;
+    if (b < batch_size) {
+        proposal_ids[b] = roots[chain_index * batch_size + b];
+    }
+}
+
+void invokeDraftSelectRoot(int* proposal_ids, const int* roots, int batch_size, int chain_index, cudaStream_t stream)
+{
+    if (batch_size == 0) {
+        return;
+    }
+    constexpr int block_size = 128;
+    const int     grid       = cdiv(batch_size, block_size);
+    DraftSelectRootKernel<<<grid, block_size, 0, stream>>>(proposal_ids, roots, batch_size, chain_index);
 }
 
 }  // namespace turbomind

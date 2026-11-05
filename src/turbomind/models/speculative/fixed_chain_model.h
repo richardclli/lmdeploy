@@ -37,6 +37,7 @@ protected:
         Buffer_<int>  draft_selected_token_pos;
         Buffer_<bool> draft_candidate_active;
         Buffer_<int>  draft_proposal_ids;
+        Buffer_<int>  draft_roots;      // [chain][batch] top-M roots (M13)
         Buffer_<int>  draft_tree_base;  // per-request draft tree origin (M13)
         Tensor        draft_selected_normalized_hidden;
     };

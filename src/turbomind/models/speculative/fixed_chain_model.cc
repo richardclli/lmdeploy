@@ -46,6 +46,20 @@ FixedChainSpeculativeModel::FixedChainSpeculativeModel(const SpeculativeModelArg
             tree_policy_ = std::make_unique<TreePolicy>(TreePolicy::DisjointChains(a, b));
         }
         if (tree_policy_) {
+            // M13 A/B result: branching (M>1) needs per-attention-layer KV
+            // relocation for the accepted non-contiguous path (not implemented);
+            // without it output is corrupt, and the 2x draft cost already makes it
+            // slower than the chain (95.5 vs 113.2 t/s on quasar, SM75). So M>1 is
+            // disabled and falls back to the (exact) chain. Only the M==1
+            // tree-shaped verification remains selectable.
+            if (tree_policy_->width() > 1 || tree_policy_->is_tail_branch()) {
+                std::fprintf(stderr,
+                             "[TM][spec_tree] M>1 branching disabled (needs KV relocation); using chain\n");
+                tree_policy_.reset();
+                policy_ptr_ = &policy_;
+            }
+        }
+        if (tree_policy_) {
             policy_ptr_  = tree_policy_.get();
             node_parent_host_ = tree_policy_->parent();
             if (node_parent_host_.size() <= verification_attention::Arguments::kMaxTreeNode) {
@@ -76,6 +90,7 @@ FixedChainSpeculativeModel::FixedChainSpeculativeModel(const SpeculativeModelArg
         data.draft_selected_token_pos = {param.max_batch_size, kDEVICE};
         data.draft_candidate_active   = {param.max_batch_size, kDEVICE};
         data.draft_proposal_ids       = {param.max_batch_size, kDEVICE};
+        data.draft_roots              = {param.max_batch_size * verification_attention::Arguments::kMaxTreeNode, kDEVICE};
         data.draft_tree_base          = {param.max_batch_size, kDEVICE};
 
         data.draft_selected_normalized_hidden = {
@@ -130,6 +145,10 @@ void FixedChainSpeculativeModel::RunDraft(int phase, const DraftContext& ctx, Te
     const int target_query_count = chain.refresh_decode.query_count + chain.refresh_prefill.query_count;
     const int candidate_count    = chain.draft_extension_query_count;
     const int k                  = policy_ptr_->max_proposals();
+    // M13: real branching tree (best-of-M disjoint chains) uses per-chain authoring.
+    const bool tree_chains = tree_policy_ && !tree_policy_->is_tail_branch() && tree_policy_->width() > 1;
+    const int  tree_M      = tree_chains ? tree_policy_->width() : 1;
+    const int  tree_D      = tree_chains ? tree_policy_->depth() : 1;
     const cudaStream_t stream    = core::Context::stream().handle();
     const int probe_round        = SpecProbeEnabled() ? g_spec_probe_round.fetch_add(1) : -1;
 
@@ -217,18 +236,35 @@ void FixedChainSpeculativeModel::RunDraft(int phase, const DraftContext& ctx, Te
         Tensor      logits = ctx.head_storage.slice({0, 0}, {candidate_count, hw.vocab_size_padded});
         logits            = HeadModel().Logits(out.selected_hidden, logits, draft_env);
         dump_draft_logits(logits, 0);
-        invokeDraftArgmaxAndStoreToken(logits,
-                                       data.draft_proposal_ids.data(),
-                                       ctx.request_token_ids_ptrs,
-                                       chain.draft_extension_q_offsets.data(),
-                                       data.draft_candidate_active.data(),
-                                       ctx.sequence_length.data(),
-                                       ctx.accept_len.data(),
-                                       ctx.batch_size,
-                                       candidate_count,
-                                       0,
-                                       hw.vocab_size,
-                                       stream);
+        if (tree_chains) {
+            invokeDraftTopMRoot(logits,
+                                data.draft_roots.data(),
+                                ctx.request_token_ids_ptrs,
+                                chain.draft_extension_q_offsets.data(),
+                                data.draft_candidate_active.data(),
+                                ctx.sequence_length.data(),
+                                ctx.accept_len.data(),
+                                ctx.batch_size,
+                                hw.vocab_size,
+                                tree_M,
+                                tree_D,
+                                stream);
+        }
+        else {
+            invokeDraftArgmaxAndStoreToken(logits,
+                                           data.draft_proposal_ids.data(),
+                                           ctx.request_token_ids_ptrs,
+                                           chain.draft_extension_q_offsets.data(),
+                                           data.draft_candidate_active.data(),
+                                           ctx.sequence_length.data(),
+                                           ctx.accept_len.data(),
+                                           ctx.batch_size,
+                                           candidate_count,
+                                           0,
+                                           0,
+                                           hw.vocab_size,
+                                           stream);
+        }
     }
 
     if (!run_extensions) {
@@ -240,6 +276,68 @@ void FixedChainSpeculativeModel::RunDraft(int phase, const DraftContext& ctx, Te
     extension_env.at("q_offsets") = chain.draft_extension_q_offsets.slice(0, ctx.batch_size + 1);
     extension_env.at("k_offsets") = chain.draft_extension_k_offsets.slice(0, ctx.batch_size + 1);
     extension_env.produce("decoder_local_token_nums", extension_local_token_nums);
+
+    if (tree_chains) {
+        // Author each chain greedily in turn (1 row/seq per pass). Chain `m`
+        // occupies draft nodes `m*D + j`; its KV stays in the sequence cache and
+        // is masked out of the other chains by the draft-side tree mask.
+        LanguageModel::DecoderOutputs refresh_out = out;
+        for (int m = 0; m < tree_M; ++m) {
+            invokeDraftSelectRoot(data.draft_proposal_ids.data(), data.draft_roots.data(), ctx.batch_size, m, stream);
+            LanguageModel::DecoderOutputs prev = refresh_out;
+            for (int i = 0; i < tree_D - 1; ++i) {
+                carry      = NextCarry(prev, i, phase, env, stream);
+                embeddings = Embed(phase,
+                                   data.draft_proposal_ids.slice(0, candidate_count),
+                                   candidate_count,
+                                   ctx,
+                                   extension_env,
+                                   EmbedStage::kExtension);
+                combined   = Combine(phase, std::move(embeddings), std::move(carry), candidate_count, extension_env);
+
+                invokeBuildDraftExtensionKeyOffsets(chain.draft_extension_k_offsets.data(),
+                                                    chain.draft_extension_q_offsets.data(),
+                                                    ctx.sequence_length.data(),
+                                                    ctx.accept_len.data(),
+                                                    ctx.batch_size,
+                                                    i,
+                                                    m * tree_D,
+                                                    stream);
+
+                LanguageModel::DecoderInputs extension_in;
+                extension_in.residual               = std::move(combined.residual);
+                extension_in.attention_input        = std::move(combined.attention_input);
+                extension_in.selected_token_pos     = draft_identity_token_pos_.slice(0, candidate_count);
+                extension_in.selected_hidden_buffer = data.draft_selected_normalized_hidden.slice(
+                    {0, 0}, {candidate_count, draft_hidden_});
+                extension_in.attention_metadata = &extension_metadata;
+
+                out = draft_.RunDecoder(phase, extension_in, extension_env);
+
+                if (candidate_count > 0) {
+                    const auto& hw     = HeadModel().weights();
+                    Tensor      logits = ctx.head_storage.slice({0, 0}, {candidate_count, hw.vocab_size_padded});
+                    logits             = HeadModel().Logits(out.selected_hidden, logits, extension_env);
+                    dump_draft_logits(logits, i + 1);
+                    invokeDraftArgmaxAndStoreToken(logits,
+                                                   data.draft_proposal_ids.data(),
+                                                   ctx.request_token_ids_ptrs,
+                                                   chain.draft_extension_q_offsets.data(),
+                                                   data.draft_candidate_active.data(),
+                                                   ctx.sequence_length.data(),
+                                                   ctx.accept_len.data(),
+                                                   ctx.batch_size,
+                                                   candidate_count,
+                                                   i + 1,
+                                                   m * tree_D,
+                                                   hw.vocab_size,
+                                                   stream);
+                }
+                prev = out;
+            }
+        }
+        return;
+    }
 
     for (int step = 1; step < k; ++step) {
         const int i = step - 1;
@@ -259,6 +357,7 @@ void FixedChainSpeculativeModel::RunDraft(int phase, const DraftContext& ctx, Te
                                             ctx.accept_len.data(),
                                             ctx.batch_size,
                                             i,
+                                            0,
                                             stream);
 
         LanguageModel::DecoderInputs extension_in;
@@ -286,6 +385,7 @@ void FixedChainSpeculativeModel::RunDraft(int phase, const DraftContext& ctx, Te
                                            ctx.batch_size,
                                            candidate_count,
                                            i + 1,
+                                           0,
                                            hw.vocab_size,
                                            stream);
         }

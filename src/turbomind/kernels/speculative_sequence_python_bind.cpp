@@ -111,6 +111,7 @@ void BindSpeculativeSequence(py::module_& module)
                                                 accept_len.data_or(static_cast<int*>(nullptr)),
                                                 static_cast<int>(entry_sequence_length.shape(0)),
                                                 extension_index,
+                                                0,
                                                 reinterpret_cast<cudaStream_t>(stream_ptr));
         },
         py::arg("k_offsets"),
@@ -205,6 +206,7 @@ void BindSpeculativeSequence(py::module_& module)
                 static_cast<int>(token_ids_ptrs.shape(0)),
                 static_cast<int>(logits.shape(0)),
                 proposal_index,
+                0,
                 vocab_size,
                 reinterpret_cast<cudaStream_t>(stream_ptr));
         },

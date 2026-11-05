@@ -24,6 +24,7 @@ void invokeBuildDraftExtensionKeyOffsets(int*         k_offsets,
                                          const int*   accept_len,
                                          int          batch_size,
                                          int          extension_index,
+                                         int          chain_offset,
                                          cudaStream_t stream);
 
 void invokeBuildDraftTreeBase(int*         tree_base,
@@ -71,8 +72,24 @@ void invokeDraftArgmaxAndStoreToken(const Tensor& logits,
                                     int           batch_size,
                                     int           candidate_count,
                                     int           proposal_index,
+                                    int           chain_offset,
                                     int           vocab_size,
                                     cudaStream_t  stream);
+
+void invokeDraftTopMRoot(const Tensor& logits,
+                         int*          roots,
+                         int* const*   token_ids_ptrs,
+                         const int*    extension_q_offsets,
+                         const bool*   candidate_active,
+                         const int*    entry_sequence_length,
+                         const int*    accept_len,
+                         int           batch_size,
+                         int           vocab_size,
+                         int           chain_count,
+                         int           depth,
+                         cudaStream_t  stream);
+
+void invokeDraftSelectRoot(int* proposal_ids, const int* roots, int batch_size, int chain_index, cudaStream_t stream);
 
 void invokeAdvanceSequenceByAcceptedSpan(
     int* sequence_length, const int* accept_len, int* accepted_draft_count, int batch_size, cudaStream_t stream);
