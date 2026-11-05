@@ -65,7 +65,10 @@ struct Mainloop<arch::Sm70, Impl_> {
                                int            window_size,
                                float          qk_scale,
                                SharedStorage& storage,
-                               const StoreS&  store_S)
+                               const StoreS&  store_S,
+                               const int*     node_parent = nullptr,
+                               int            node_stride = 0,
+                               int            tree_base   = -1)
     {
         GmemIterK gmem_K{};
         GmemIterV gmem_V{};
@@ -104,7 +107,7 @@ struct Mainloop<arch::Sm70, Impl_> {
             }
 
             if constexpr (is_mask) {
-                ApplyMask<Causal>(frag_S, offset_Q, offset_K, max_step, window_size);
+                ApplyMask<Causal>(frag_S, offset_Q, offset_K, max_step, window_size, node_parent, node_stride, tree_base);
             }
 
             Impl::Softmax<is_mask>(frag_S, frag_M, frag_L, frag_O, qk_scale);
@@ -136,14 +139,48 @@ struct Mainloop<arch::Sm70, Impl_> {
     }
 
     template<bool Causal>
-    __device__ void ApplyMask(FragS& frag_S, int offset_Q, int offset_K, int max_step, int window_size)
+    __device__ void ApplyMask(FragS&     frag_S,
+                              int        offset_Q,
+                              int        offset_K,
+                              int        max_step,
+                              int        window_size,
+                              const int* node_parent = nullptr,
+                              int        node_stride = 0,
+                              int        tree_base   = -1)
     {
         Impl::ForeachS(frag_S, [&](int hi, int qi, int si, int ri, float& score) {
             const int local_k = offset_K + si;
             bool      valid   = local_k < max_step;
             if constexpr (Causal) {
-                const int w = (offset_Q + qi) - (local_k * cp_size_ + cp_rank_);
-                valid       = valid && 0 <= w && w < window_size;
+                if (node_stride > 0 && tree_base >= 0) {
+                    // Node keys are visible only along the ancestor chain; context
+                    // keys are visible only when not ahead of the query (the causal
+                    // upper bound `0 <= w` is required because `max_step` alone does
+                    // not bound the query's own position).
+                    const int w  = (offset_Q + qi) - local_k;
+                    bool      vis = false;
+                    if (local_k < tree_base) {
+                        vis = true;
+                    }
+                    else {
+                        const int nk    = local_k - tree_base;
+                        const int nq    = (offset_Q + qi) - tree_base;
+                        int       cur   = nq;
+                        int       guard = 0;
+                        while (cur >= 0 && cur < node_stride && guard++ <= node_stride) {
+                            if (cur == nk) {
+                                vis = true;
+                                break;
+                            }
+                            cur = node_parent[cur];
+                        }
+                    }
+                    valid = valid && vis && 0 <= w && w < window_size;
+                }
+                else {
+                    const int w = (offset_Q + qi) - (local_k * cp_size_ + cp_rank_);
+                    valid       = valid && 0 <= w && w < window_size;
+                }
             }
             if (!valid) {
                 score -= std::numeric_limits<float>::infinity();

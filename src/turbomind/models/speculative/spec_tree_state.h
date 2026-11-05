@@ -7,9 +7,14 @@
 
 namespace turbomind {
 
-// Device buffer [max_batch * node_stride]; node_parent[r*stride + p] = parent
-// query row of node p (-1 = root/context). node_stride == node_count + 1.
+// Host parent map (node_parent[p] = parent node of p, -1 = root/context). Read by
+// UnifiedAttentionLayer::MakeVerificationArguments, which copies it by value into
+// the verification kernel arguments. node_stride == node_count + 1.
 inline const int* g_spec_node_parent = nullptr;
 inline int        g_spec_node_stride = 0;
+
+// Whether the draft-side tree mask (mainloop_sm70.h ApplyMask) should be fed the
+// per-request tree origin by the draft decode. Set by the spec model.
+inline bool g_spec_draft_tree_mask = false;
 
 }  // namespace turbomind

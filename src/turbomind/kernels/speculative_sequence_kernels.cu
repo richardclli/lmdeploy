@@ -137,6 +137,28 @@ void invokeBuildDraftExtensionKeyOffsets(int*         k_offsets,
         k_offsets, q_offsets, entry_sequence_length, accept_len, batch_size, extension_index);
 }
 
+__global__ void build_draft_tree_base(int* tree_base, const int* entry_sequence_length, const int* accept_len, int batch_size)
+{
+    const int b = blockIdx.x * blockDim.x + threadIdx.x;
+    if (b < batch_size) {
+        tree_base[b] = entry_sequence_length[b] + accept_len[b];
+    }
+}
+
+void invokeBuildDraftTreeBase(int*         tree_base,
+                              const int*   entry_sequence_length,
+                              const int*   accept_len,
+                              int          batch_size,
+                              cudaStream_t stream)
+{
+    if (batch_size == 0) {
+        return;
+    }
+    constexpr int block_size = 128;
+    const int     grid_size  = cdiv(batch_size, block_size);
+    build_draft_tree_base<<<grid_size, block_size, 0, stream>>>(tree_base, entry_sequence_length, accept_len, batch_size);
+}
+
 __global__ void InitializeTargetVerificationKernel(bool*             block_logits_active,
                                                    int*              effective_history,
                                                    int*              verification_draft_ids,

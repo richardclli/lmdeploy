@@ -113,6 +113,9 @@ struct AttentionData {
     Buffer_<int>  k_offsets;
     Buffer_<int>  readonly_block_num;  // per-request, batch order
 
+    // M13: draft-side tree origin (see AttentionForwardMetadata::tree_base)
+    Buffer_<int> tree_base;
+
     // Global per-token validity mask, owned by LanguageModel and borrowed here; the
     // content is only built at Forward time. Consumed by the attention reduce.
     Buffer_<bool> token_mask;
@@ -461,6 +464,7 @@ void UnifiedAttentionLayer::SetForwardMetadata(int phase, const AttentionForward
 
     d.q_offsets = metadata.q_offsets.borrow();
     d.k_offsets = metadata.k_offsets.borrow();
+    d.tree_base = metadata.tree_base ? metadata.tree_base.borrow() : Buffer_<int>{};
 }
 
 void UnifiedAttentionLayer::Forward(ForwardParam p)
@@ -649,6 +653,18 @@ Tensor UnifiedAttentionLayer::core_attention(Tensor& qkv, const ForwardParam& p,
         params.cu_q_len           = d.q_offsets.data() + offset;
         params.cu_k_len           = d.k_offsets.data() + offset;
         params.readonly_block_num = d.readonly_block_num.data() + offset;
+
+        // M13: draft-side tree mask. Active only when the caller supplied the
+        // per-request tree origin (draft extension decode); empty elsewhere.
+        if (const int* tree_base = d.tree_base.data_or((const int*)nullptr);
+            tree_base && g_spec_node_parent && g_spec_node_stride > 0
+            && g_spec_node_stride <= AttentionParams<T>::kMaxTreeNode) {
+            for (int i = 0; i < g_spec_node_stride; ++i) {
+                params.node_parent[i] = g_spec_node_parent[i];
+            }
+            params.node_stride = g_spec_node_stride;
+            params.tree_base   = tree_base + offset;
+        }
 
         params.num_heads     = local_head_num;
         params.num_kv_heads  = local_kv_head_num;

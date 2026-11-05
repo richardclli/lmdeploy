@@ -52,6 +52,7 @@ FixedChainSpeculativeModel::FixedChainSpeculativeModel(const SpeculativeModelArg
                 if (std::getenv("TM_SPEC_TREE_NOMASK") == nullptr) {
                     g_spec_node_parent = node_parent_host_.data();
                     g_spec_node_stride = static_cast<int>(node_parent_host_.size());
+                    g_spec_draft_tree_mask = true;  // M13: draft decode also masks (same predicate)
                 }
                 std::fprintf(stderr, "[TM][spec_tree] enabled nodes=%d stride=%zu tail=%d\n", tree_policy_->node_count(), node_parent_host_.size(), (int)tree_policy_->is_tail_branch());
             }
@@ -74,6 +75,7 @@ FixedChainSpeculativeModel::FixedChainSpeculativeModel(const SpeculativeModelArg
         data.draft_selected_token_pos = {param.max_batch_size, kDEVICE};
         data.draft_candidate_active   = {param.max_batch_size, kDEVICE};
         data.draft_proposal_ids       = {param.max_batch_size, kDEVICE};
+        data.draft_tree_base          = {param.max_batch_size, kDEVICE};
 
         data.draft_selected_normalized_hidden = {
             {param.max_batch_size, draft_hidden_}, draft_type, kDEVICE};
@@ -153,6 +155,14 @@ void FixedChainSpeculativeModel::RunDraft(int phase, const DraftContext& ctx, Te
     extension_metadata.prefill   = {};
     extension_metadata.q_offsets = chain.draft_extension_q_offsets.slice(0, ctx.batch_size + 1);
     extension_metadata.k_offsets = chain.draft_extension_k_offsets.slice(0, ctx.batch_size + 1);
+
+    // M13: enable the draft-side tree mask on the extension decode by supplying
+    // the per-request tree origin (node 0 lands at entry_len + accept_len).
+    if (g_spec_draft_tree_mask && ctx.batch_size > 0 && std::getenv("TM_SPEC_TREE_NODRAFTMASK") == nullptr) {
+        invokeBuildDraftTreeBase(
+            data.draft_tree_base.data(), ctx.sequence_length.data(), ctx.accept_len.data(), ctx.batch_size, stream);
+        extension_metadata.tree_base = data.draft_tree_base.slice(0, ctx.batch_size);
+    }
 
     Tensor extension_local_token_nums{chain.draft_extension_local_token_nums.data(),
                                       Layout{{static_cast<ssize_t>(chain.draft_extension_local_token_nums.size())}},

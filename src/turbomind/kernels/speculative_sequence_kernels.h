@@ -26,6 +26,12 @@ void invokeBuildDraftExtensionKeyOffsets(int*         k_offsets,
                                          int          extension_index,
                                          cudaStream_t stream);
 
+void invokeBuildDraftTreeBase(int*         tree_base,
+                              const int*   entry_sequence_length,
+                              const int*   accept_len,
+                              int          batch_size,
+                              cudaStream_t stream);
+
 void invokeInitializeTargetVerification(bool*             block_logits_active,
                                         int*              effective_history,
                                         int*              verification_draft_ids,

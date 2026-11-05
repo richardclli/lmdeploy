@@ -73,6 +73,17 @@ struct AttentionParams {
     bool  causal{true};
     int   layer_id;  // for debugging
 
+    // M13: draft-side tree mask (draft decode only). When `node_stride > 0`,
+    // key node `nk = local_k - tree_base[b]` is visible to query node
+    // `nq = (offset_Q + qi) - tree_base[b]` iff nk is an ancestor-or-self of nq;
+    // keys with `local_k < tree_base[b]` (context) are always visible.
+    // The parent map is passed by value (constant-memory, like the verification
+    // kernel) and shared by all requests in the launch.
+    static constexpr int kMaxTreeNode = 24;
+    int                  node_parent[kMaxTreeNode]{};
+    int                  node_stride{0};
+    const int*           tree_base{nullptr};
+
     // rotary embedding
     RopeKernelParam rope_param;
 

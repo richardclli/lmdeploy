@@ -522,7 +522,10 @@ struct AttentionUniversal {
                  params.window_size,
                  params.inv_sqrt_dh,
                  storage,
-                 StoreS(params, query_idx, head_idx, batch_idx, context_len));
+                 StoreS(params, query_idx, head_idx, batch_idx, context_len),
+                 params.node_parent,
+                 params.node_stride,
+                 params.tree_base ? params.tree_base[batch_idx] : -1);
 
         Impl::Merge(frag_O, frag_M, frag_L, params.inv_sqrt_dh, storage);
 

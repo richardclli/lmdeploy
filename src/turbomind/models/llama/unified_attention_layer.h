@@ -54,6 +54,10 @@ struct AttentionForwardMetadata {
 
     Buffer_<int> q_offsets;
     Buffer_<int> k_offsets;
+
+    // M13: per-request draft-side tree origin, indexed by batch row. Present only
+    // for the draft extension decode; empty elsewhere. See AttentionParams.
+    Buffer_<int> tree_base;
 };
 
 class UnifiedAttentionLayer {
