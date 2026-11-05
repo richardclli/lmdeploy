@@ -40,6 +40,7 @@
 #include "src/turbomind/kernels/attention/decoding.h"
 #include "src/turbomind/kernels/attention/kv_cache_utils_v2.h"
 #include "src/turbomind/kernels/attention/verification/attention.h"
+#include "src/turbomind/models/speculative/spec_tree_state.h"
 #include "src/turbomind/kernels/norm/rms_norm.h"
 
 #include "src/turbomind/macro.h"
@@ -759,6 +760,13 @@ Tensor UnifiedAttentionLayer::core_attention(Tensor& qkv, const ForwardParam& p,
         a.quant_policy        = quant_policy_;
         a.data_type           = dtype;
         a.stream              = stream;
+        if (g_spec_node_parent && g_spec_node_stride > 0
+            && g_spec_node_stride <= verification_attention::Arguments::kMaxTreeNode) {
+            for (int i = 0; i < g_spec_node_stride; ++i) {
+                a.node_parent[i] = g_spec_node_parent[i];
+            }
+            a.node_stride = g_spec_node_stride;
+        }
 
         const int m_slices = cdiv(
             a.max_query_length * a.query_group_size,

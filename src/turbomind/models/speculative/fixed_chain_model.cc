@@ -2,14 +2,20 @@
 
 #include "src/turbomind/models/speculative/fixed_chain_model.h"
 
+#include <algorithm>
+#include <cstdio>
+#include <cstdlib>
 #include <numeric>
+#include <vector>
 
 #include "src/turbomind/comm/device_comm.h"
 #include "src/turbomind/core/context.h"
 #include "src/turbomind/core/copy.h"
 #include "src/turbomind/kernels/speculative_sequence_kernels.h"
 #include "src/turbomind/models/model_weight.h"
+#include "src/turbomind/kernels/attention/verification/attention.h"
 #include "src/turbomind/models/speculative/hidden_state_tap.h"
+#include "src/turbomind/models/speculative/spec_tree_state.h"
 #include "src/turbomind/utils/spec_probe.h"
 
 namespace turbomind {
@@ -21,10 +27,31 @@ FixedChainSpeculativeModel::FixedChainSpeculativeModel(const SpeculativeModelArg
     draft_{args.registry, args.param, args.ctx, args.draft_weights, args.phases},
     draft_hidden_{draft_.weights().hidden_units},
     policy_{args.param.spec_num_draft_tokens},
+    policy_ptr_{&policy_},
     fixed_chain_{args.ctx.comm, args.phases, args.param.max_batch_size},
     data_(args.phases)
 {
     const EngineParam& param = args.param;
+
+    // M13 spike: fixed-shape tree verification via TM_SPEC_TREE="<chains>,<depth>".
+    if (const char* spec_tree = std::getenv("TM_SPEC_TREE")) {
+        int chains = 0, depth = 0;
+        if (std::sscanf(spec_tree, "%d,%d", &chains, &depth) == 2 && chains > 0 && depth > 0) {
+            tree_policy_ = std::make_unique<TreePolicy>(chains, depth);
+            policy_ptr_  = tree_policy_.get();
+            node_parent_host_ = tree_policy_->parent();
+            if (node_parent_host_.size() <= verification_attention::Arguments::kMaxTreeNode) {
+                if (std::getenv("TM_SPEC_TREE_NOMASK") == nullptr) {
+                    g_spec_node_parent = node_parent_host_.data();
+                    g_spec_node_stride = static_cast<int>(node_parent_host_.size());
+                }
+                std::fprintf(stderr, "[TM][spec_tree] enabled chains=%d depth=%d nodes=%d stride=%zu\n", chains, depth, tree_policy_->node_count(), node_parent_host_.size());
+            }
+            else {
+                std::fprintf(stderr, "[TM][spec_tree] disabled: %zu nodes > kMaxTreeNode\n", node_parent_host_.size());
+            }
+        }
+    }
 
     Buffer_<int> identity_host{param.max_batch_size, kCPUpinned};
     draft_identity_token_pos_ = {param.max_batch_size, kDEVICE};
@@ -49,7 +76,7 @@ FixedChainSpeculativeModel::~FixedChainSpeculativeModel() = default;
 
 const SpeculativePolicy& FixedChainSpeculativeModel::policy() const
 {
-    return policy_;
+    return *policy_ptr_;
 }
 
 HiddenStateTap* FixedChainSpeculativeModel::Tap(int)
@@ -91,7 +118,7 @@ void FixedChainSpeculativeModel::RunDraft(int phase, const DraftContext& ctx, Te
 
     const int target_query_count = chain.refresh_decode.query_count + chain.refresh_prefill.query_count;
     const int candidate_count    = chain.draft_extension_query_count;
-    const int k                  = policy_.max_proposals();
+    const int k                  = policy_ptr_->max_proposals();
     const cudaStream_t stream    = core::Context::stream().handle();
     const int probe_round        = SpecProbeEnabled() ? g_spec_probe_round.fetch_add(1) : -1;
 

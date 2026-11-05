@@ -53,12 +53,13 @@ struct Arguments {
     DataType     data_type{};
     cudaStream_t stream{};
 
-    // Tree verification (optional). When set, draft query node `p` attends to
-    // context + its ancestors (instead of the causal `keys <= p`). Layout:
-    // node_parent[request * node_stride + p] = parent node id, -1 = root.
-    // Nodes use the same index space as the draft keys (0 .. query_length-1).
-    const int* node_parent{};
-    int        node_stride{};
+    // Tree verification (optional). When node_stride > 0, draft query node `p`
+    // attends to context + its ancestors (instead of the causal `keys <= p`).
+    // node_parent[p] = parent node id (-1 = root); the shape is shared by all
+    // requests. Nodes use the same index space as the draft keys.
+    static constexpr int kMaxTreeNode = 24;
+    int                  node_parent[kMaxTreeNode]{};
+    int                  node_stride{};
 };
 
 inline bool IsSm75(const Arguments& arguments)

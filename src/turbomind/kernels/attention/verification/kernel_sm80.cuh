@@ -301,7 +301,7 @@ struct VerificationAttentionMainloop {
                 const int last_valid     = history_length + query_position;
                 const int first_valid    = max(0, last_valid - arguments.window_size + 1);
                 bool      key_visible;
-                if (arguments.node_parent) {
+                if (arguments.node_stride > 0) {
                     // Tree verification: context keys are always visible; a draft
                     // key j is visible to node p iff j is an ancestor-or-self of p.
                     if (absolute_key < history_length) {
@@ -310,12 +310,14 @@ struct VerificationAttentionMainloop {
                     else {
                         const int j = absolute_key - history_length;
                         key_visible = false;
-                        for (int cur = query_position; cur != -1;
-                             cur = arguments.node_parent[request * arguments.node_stride + cur]) {
+                        int cur   = query_position;
+                        int guard = 0;
+                        while (cur >= 0 && cur < arguments.node_stride && guard++ <= arguments.node_stride) {
                             if (cur == j) {
                                 key_visible = true;
                                 break;
                             }
+                            cur = arguments.node_parent[cur];
                         }
                     }
                 }

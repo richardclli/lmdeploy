@@ -5,9 +5,11 @@
 #include "src/turbomind/models/llama/context.h"
 #include "src/turbomind/models/llama/unified_attention_layer.h"
 #include "src/turbomind/models/speculative/fixed_chain_policy.h"
+#include "src/turbomind/models/speculative/tree_policy.h"
 #include "src/turbomind/models/speculative/fixed_chain_setup.h"
 #include "src/turbomind/models/speculative/speculative_model.h"
 
+#include <memory>
 #include <vector>
 
 namespace turbomind {
@@ -87,9 +89,12 @@ protected:
     const int            draft_hidden_;
 
     FixedChainPolicy policy_;
+    std::unique_ptr<TreePolicy> tree_policy_;  // set when TM_SPEC_TREE is present
+    const SpeculativePolicy*    policy_ptr_;   // -> policy_ or tree_policy_
     FixedChainSetup   fixed_chain_;
 
     Buffer_<int> draft_identity_token_pos_;
+    std::vector<int> node_parent_host_;        // fixed tree parent map (<=kMaxTreeNode)
 
 private:
     void Setup(int phase, TensorMap& env);

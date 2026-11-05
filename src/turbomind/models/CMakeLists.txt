@@ -13,6 +13,7 @@ add_library(models STATIC
         output_processor.cc
         speculative/registry.cc
         speculative/fixed_chain_policy.cc
+        speculative/tree_policy.cc
         speculative/fixed_chain_setup.cc
         speculative/fixed_chain_model.cc
         speculative/collect_hidden_states.cc
