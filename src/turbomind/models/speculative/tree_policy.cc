@@ -16,13 +16,22 @@ TreePolicy TreePolicy::DisjointChains(int chain_count, int depth)
     p.depth_       = depth;
     p.width_       = chain_count;
     p.tail_branch_ = false;
-    p.parent_.resize(p.node_count_ + 1);
+    // Layout: draft nodes `m*depth + j` (chain `m`, level `j`), followed by one
+    // bonus leaf per chain `node_count + m` (child of that chain's last node).
+    // The bonus leaf's row predicts the token after a fully-accepted chain, so
+    // the bonus is path-conditioned instead of using a single shared row.
+    // For chain_count == 1 this is exactly the linear chain (drafts 0..d-1 plus
+    // one bonus row).
+    const int positions = p.node_count_ + chain_count;
+    p.parent_.resize(positions);
     for (int m = 0; m < chain_count; ++m) {
         for (int j = 0; j < depth; ++j) {
             p.parent_[m * depth + j] = (j == 0) ? -1 : m * depth + j - 1;
         }
     }
-    p.parent_[p.node_count_] = p.node_count_ - 1;  // bonus row
+    for (int m = 0; m < chain_count; ++m) {
+        p.parent_[p.node_count_ + m] = m * depth + (depth - 1);  // bonus leaf
+    }
     return p;
 }
 
@@ -60,7 +69,8 @@ int TreePolicy::token_row_tail() const
 
 RoundExtent TreePolicy::Extent(const RoundRequest&) const
 {
-    return {node_count_ + 1, node_count_ - 1};
+    // query rows = draft nodes + one bonus leaf per chain; cache private tail = drafts - 1.
+    return {node_count_ + width_, node_count_ - 1};
 }
 
 std::optional<BootstrapExtent> TreePolicy::Bootstrap(int prompt_len) const

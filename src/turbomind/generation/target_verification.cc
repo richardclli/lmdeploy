@@ -16,6 +16,7 @@
 #include "src/turbomind/kernels/speculative_sequence_kernels.h"
 
 #include "src/turbomind/models/llama/llama_kernels.h"
+#include "src/turbomind/models/speculative/spec_tree_state.h"
 #include "src/turbomind/models/speculative/speculative_model.h"
 #include "src/turbomind/utils/cuda_utils.h"
 #include "src/turbomind/utils/spec_probe.h"
@@ -222,6 +223,15 @@ void TargetVerification::ProcessTargetBlock(int phase, int position_count, const
     p.request_count        = B;
     p.generation_count     = G;
     p.position_count       = position_count;
+
+    // M13 tree walk: pass the shared parent map (by value, constant memory).
+    if (g_spec_node_stride > 0 && g_spec_node_stride <= VerifyTargetBlockParams::kMaxTreeNode) {
+        for (int i = 0; i < g_spec_node_stride; ++i) {
+            p.node_parent[i] = g_spec_node_parent[i];
+        }
+        p.node_stride = g_spec_node_stride;
+        p.node_count  = g_spec_node_count;
+    }
 
     shared_.sampling->VerifyTargetBlock(phase, probabilities, p);
 }

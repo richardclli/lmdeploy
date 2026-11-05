@@ -12,6 +12,7 @@ namespace turbomind {
 // the verification kernel arguments. node_stride == node_count + 1.
 inline const int* g_spec_node_parent = nullptr;
 inline int        g_spec_node_stride = 0;
+inline int        g_spec_node_count  = 0;  // number of draft nodes (excludes bonus leaves)
 
 // Whether the draft-side tree mask (mainloop_sm70.h ApplyMask) should be fed the
 // per-request tree origin by the draft decode. Set by the spec model.

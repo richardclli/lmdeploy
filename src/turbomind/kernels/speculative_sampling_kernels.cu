@@ -237,6 +237,110 @@ __global__ void VerifyTargetBlock(VerifyTargetBlockParams p)
             }
         }
     }
+    else if (p.node_stride > 0) {
+        // ----- M13 tree walk -------------------------------------------------
+        // Follow ancestors from the context root. At each level verify the
+        // candidate draft children; the first whose draft token is accepted
+        // extends the path. The first non-matching child contributes its target
+        // sample as the replacement token and ends the walk. A fully accepted
+        // chain is followed by its bonus-leaf row.
+        int  cur          = -1;
+        bool reached_leaf = false;
+        while (continue_verification) {
+            int next        = -1;
+            int replacement = -1;
+
+            for (int node = 0; node < p.node_count; ++node) {
+                if (p.node_parent[node] != cur) {
+                    continue;
+                }
+                const int flat = node * p.generation_count + g;
+                if (!p.logits_active[flat]) {
+                    continue;
+                }
+                const float* row   = p.probabilities + flat * p.probability_stride;
+                const int*   ids   = p.probability_token_ids + flat * p.token_id_stride;
+                const int    draft = p.verification_draft_ids[node * p.draft_row_stride + g];
+
+                VerifyOneProcessedDraft<BlockSize>(row,
+                                                   ids,
+                                                   p.kept_count[flat],
+                                                   draft,
+                                                   p.greedy[flat],
+                                                   random_state,
+                                                   selected,
+                                                   accepted,
+                                                   storage);
+                __syncthreads();
+                if (replacement < 0) {
+                    replacement = node;
+                }
+                if (accepted) {
+                    next = node;
+                    break;
+                }
+            }
+
+            if (next >= 0) {
+                if (threadIdx.x == 0) {
+                    p.request_token_ids_ptrs[b][p.entry_sequence_length[b] + span_len] = selected;
+                    p.selected_span_ids[b * p.selected_span_stride + span_len]         = selected;
+                    ++span_len;
+                    ++accepted_drafts;
+                }
+                __syncthreads();
+                cur = next;
+
+                bool has_child = false;
+                for (int node = 0; node < p.node_count; ++node) {
+                    if (p.node_parent[node] == cur) {
+                        has_child = true;
+                        break;
+                    }
+                }
+                if (!has_child) {
+                    reached_leaf = true;
+                    break;
+                }
+            }
+            else {
+                // No child matched: the first candidate's sample is the replacement.
+                if (replacement >= 0 && threadIdx.x == 0) {
+                    p.request_token_ids_ptrs[b][p.entry_sequence_length[b] + span_len] = selected;
+                    p.selected_span_ids[b * p.selected_span_stride + span_len]         = selected;
+                    ++span_len;
+                }
+                __syncthreads();
+                continue_verification = false;
+                break;
+            }
+        }
+
+        if (reached_leaf) {
+            int bonus_row = -1;
+            for (int node = p.node_count; node < p.node_stride; ++node) {
+                if (p.node_parent[node] == cur) {
+                    bonus_row = node;
+                    break;
+                }
+            }
+            if (bonus_row >= 0) {
+                const int flat = bonus_row * p.generation_count + g;
+                if (p.logits_active[flat]) {
+                    const float* row = p.probabilities + flat * p.probability_stride;
+                    const int*   ids = p.probability_token_ids + flat * p.token_id_stride;
+                    SampleOneProcessedDistribution<BlockSize>(
+                        row, ids, p.kept_count[flat], random_state, selected, storage);
+                    __syncthreads();
+                    if (threadIdx.x == 0) {
+                        p.request_token_ids_ptrs[b][p.entry_sequence_length[b] + span_len] = selected;
+                        p.selected_span_ids[b * p.selected_span_stride + span_len]         = selected;
+                        ++span_len;
+                    }
+                }
+            }
+        }
+    }
     else {
         for (int position = 0; position < p.position_count - 1; ++position) {
             const int flat = position * p.generation_count + g;

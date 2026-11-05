@@ -52,6 +52,7 @@ FixedChainSpeculativeModel::FixedChainSpeculativeModel(const SpeculativeModelArg
                 if (std::getenv("TM_SPEC_TREE_NOMASK") == nullptr) {
                     g_spec_node_parent = node_parent_host_.data();
                     g_spec_node_stride = static_cast<int>(node_parent_host_.size());
+                    g_spec_node_count  = tree_policy_->node_count();
                     g_spec_draft_tree_mask = true;  // M13: draft decode also masks (same predicate)
                 }
                 std::fprintf(stderr, "[TM][spec_tree] enabled nodes=%d stride=%zu tail=%d\n", tree_policy_->node_count(), node_parent_host_.size(), (int)tree_policy_->is_tail_branch());

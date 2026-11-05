@@ -32,6 +32,14 @@ struct VerifyTargetBlockParams {
     int request_count;
     int generation_count;
     int position_count;
+
+    // M13 tree walk: draft nodes [0, node_count) form a forest; one bonus leaf
+    // per chain in [node_count, node_stride). node_parent[p] = parent node (-1 =
+    // context). node_stride == 0 selects the linear-chain verification path.
+    static constexpr int kMaxTreeNode = 24;
+    int                  node_count{};
+    int                  node_stride{};
+    int                  node_parent[kMaxTreeNode]{};
 };
 
 void invokeVerifyTargetBlock(const VerifyTargetBlockParams& params, cudaStream_t stream);
