@@ -12,6 +12,7 @@ add_library(engine STATIC
     scheduler.cc
     model_request.cc
     model_executor.cc
+    spec_fence.cc
     engine.cc
     )
 target_link_libraries(engine PRIVATE xgrammar core)

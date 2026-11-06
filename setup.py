@@ -154,6 +154,8 @@ if get_target_device() == 'cuda' and os.getenv('DISABLE_TURBOMIND', '').lower() 
                 '-DBUILD_PY_FFI=ON',
                 '-DBUILD_MULTI_GPU=' + ('OFF' if os.name == 'nt' else 'ON'),
                 '-DUSE_NVTX=' + ('OFF' if os.name == 'nt' else 'ON'),
+                # Debug build variant: sync + trace at speculative-round fences.
+                '-DTM_SPEC_FENCE_STRICT=' + ('ON' if os.getenv('TM_SPEC_FENCE_STRICT') else 'OFF'),
             ],
         ),
     ]

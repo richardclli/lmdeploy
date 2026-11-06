@@ -13,6 +13,7 @@
 #include "src/turbomind/core/scope.h"
 #include "src/turbomind/engine/batch.h"
 #include "src/turbomind/engine/model.h"
+#include "src/turbomind/engine/spec_fence.h"
 #include "src/turbomind/generation/target_verification.h"
 #include "src/turbomind/kernels/gemm/types.h"
 #include "src/turbomind/models/language_model.h"
@@ -342,6 +343,7 @@ void ModelExecutor::Impl::ForwardSpeculativeRound(int phase, TensorMap& env)
     }
 
     TargetPass target = RunTarget(phase, env, tap);
+    SpecFence("F1 target -> verify");  // target writes hidden/KV; verify reads
 
     const int positions = model_.status.VerificationPositions(phase);
 
@@ -350,8 +352,10 @@ void ModelExecutor::Impl::ForwardSpeculativeRound(int phase, TensorMap& env)
     target.head_storage = model_.target->Logits(target.hidden_states, {}, env);
     verification.ProcessTargetBlock(phase, positions, target.head_storage, env);
     verification.ClampSelectedSpan(phase, env);
+    SpecFence("F2 verify -> commit");  // verify writes the accepted span; commit/tap reads
 
     model_.target->CommitAcceptedState(phase, env.at("accept_len").buffer());
+    SpecFence("F3 commit -> draft");  // draft reads accepted state + final hidden
 
     {
         NvtxScope draft_scope{"SpeculativeModel::RunDraft"};

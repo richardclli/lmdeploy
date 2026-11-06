@@ -50,6 +50,12 @@ option(BUILD_PY_FFI "Build python ffi" ON)
 option(BUILD_TEST "Build tests" OFF)
 option(SPARSITY_SUPPORT "Build project with Ampere sparsity feature support" OFF)
 option(BUILD_FAST_MATH "Build in fast math mode" ON)
+option(TM_SPEC_FENCE_STRICT "Synchronize at speculative-round fences and trace them (debug)" OFF)
+
+if(TM_SPEC_FENCE_STRICT)
+    add_compile_definitions(TM_SPEC_FENCE_STRICT)
+    message(STATUS "TurboMind: strict speculative-round fences ENABLED")
+endif()
 
 set(NVCC_THREADS 8 CACHE STRING "NVCC threads for compiling target architectures in parallel (0 = all CPUs)")
 

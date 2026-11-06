@@ -7,6 +7,7 @@
 #include "src/turbomind/comm/device_comm.h"
 #include "src/turbomind/core/context.h"
 #include "src/turbomind/core/copy.h"
+#include "src/turbomind/engine/spec_fence.h"
 #include "src/turbomind/kernels/speculative_sequence_kernels.h"
 #include "src/turbomind/models/model_weight.h"
 #include "src/turbomind/models/speculative/hidden_state_tap.h"
@@ -169,6 +170,8 @@ void FixedChainSpeculativeModel::RunDraft(int phase, const DraftContext& ctx, Te
                                        hw.vocab_size,
                                        stream);
     }
+
+    SpecFence("F4 draft refresh -> extension");  // step KV/positions before the next reads
 
     if (!run_extensions) {
         return;
