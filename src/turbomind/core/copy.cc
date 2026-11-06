@@ -2,6 +2,7 @@
 #include "src/turbomind/core/copy.h"
 
 #include <cstdint>
+#include <cstdlib>
 #include <type_traits>
 #include <variant>
 #include <vector>
@@ -9,6 +10,7 @@
 #include <cuda_runtime.h>
 
 #include "src/turbomind/core/check.h"
+#include "src/turbomind/core/context.h"
 
 namespace turbomind::core {
 
@@ -119,6 +121,25 @@ BatchCopy::BatchCopy(): self_{this}
 void BatchCopy::Run()
 {
     if (src_.empty()) {
+        return;
+    }
+
+    // Diagnostic: `cuMemcpyBatchAsync` + CU_MEMCPY_FLAG_PREFER_OVERLAP_WITH_COMPUTE
+    // is used by default. TM_COPY_ORDERED falls back to per-copy cudaMemcpyAsync;
+    // TM_COPY_SYNC additionally synchronizes the stream afterwards.
+    static const int copy_mode = [] {
+        const char* o = std::getenv("TM_COPY_ORDERED");
+        const char* s = std::getenv("TM_COPY_SYNC");
+        return (s && *s && *s != '0') ? 2 : ((o && *o && *o != '0') ? 1 : 0);
+    }();
+    if (copy_mode > 0) {
+        for (size_t i = 0; i < src_.size(); ++i) {
+            core::Copy(src_[i], size_[i], dst_[i]);
+        }
+        if (copy_mode > 1) {
+            core::Context::stream().Sync();
+        }
+        Reset();
         return;
     }
 
