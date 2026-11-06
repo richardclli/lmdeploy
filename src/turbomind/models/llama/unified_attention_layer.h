@@ -56,6 +56,17 @@ struct AttentionForwardMetadata {
     Buffer_<int> k_offsets;
 };
 
+// Shared-scratch partition for `partial_O_` / `partial_ML_` / `split_cnt_`.
+// `kMain` serves decode and verification (the main stream); `kPrefill` serves
+// prefill, which overlaps the main stream on the aux stream. Keeping the two
+// disjoint removes the cross-stream aliasing that only `cp_size > 1` worked
+// around previously.
+enum class AttnPartition : int {
+    kMain    = 0,
+    kPrefill = 1,
+    kCount   = 2,
+};
+
 class UnifiedAttentionLayer {
 public:
     using WeightType = AttentionWeight;

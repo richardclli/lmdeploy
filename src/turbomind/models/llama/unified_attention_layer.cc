@@ -235,9 +235,12 @@ UnifiedAttentionLayer::UnifiedAttentionLayer(std::vector<AttentionWeight*> weigh
             workspace_tokens += engine_param_.max_forward_token_num;
         }
 
-        partial_O_  = Tensor_<float>({workspace_tokens, local_head_num, size_per_head}, kDEVICE);
-        partial_ML_ = Tensor_<float>({engine_param_.attn_cp_size, workspace_tokens, local_head_num, 2}, alloc);
-        split_cnt_  = Tensor_<int>({workspace_tokens}, kDEVICE);
+        // One disjoint block per stream partition (see `AttnPartition`).
+        constexpr int kPartCount = (int)AttnPartition::kCount;
+        partial_O_  = Tensor_<float>({kPartCount, workspace_tokens, local_head_num, size_per_head}, kDEVICE);
+        partial_ML_ =
+            Tensor_<float>({kPartCount, engine_param_.attn_cp_size, workspace_tokens, local_head_num, 2}, alloc);
+        split_cnt_  = Tensor_<int>({kPartCount, workspace_tokens}, kDEVICE);
 
         Clear(split_cnt_.buffer());
     }
@@ -577,7 +580,8 @@ Tensor UnifiedAttentionLayer::core_attention(Tensor& qkv, const ForwardParam& p,
             device};
     }
 
-    auto CreateParams = [&](int offset, AttentionData::Stat stat, int max_kv_splits, cudaStream_t stream) {
+    auto CreateParams =
+        [&](int offset, AttentionData::Stat stat, int max_kv_splits, cudaStream_t stream, AttnPartition partition) {
         AttentionParams<T> params{};
 
         // Batch offset for `out` and `q` are computed inside the kernel
@@ -683,10 +687,18 @@ Tensor UnifiedAttentionLayer::core_attention(Tensor& qkv, const ForwardParam& p,
         params.use_logn_attn           = weights.use_logn_attn;
         params.max_position_embeddings = weights.rope.max_position_embeddings;
 
+        // Partition-scoped scratch: `kMain` for decode/verification, `kPrefill`
+        // for the prefill that may overlap on the aux stream. The kernels index
+        // these batch-locally (starting at 0), so the two must never alias.
+        const int    part      = (int)partition;
+        const size_t stride_O  = (size_t)partial_O_.stride(0);
+        const size_t stride_ML = (size_t)partial_ML_.stride(0);
+        const size_t stride_SC = (size_t)split_cnt_.stride(0);
+
         // Decoding use only for now
-        params.split_cnt   = split_cnt_.data();
-        params.partial_ML  = partial_ML_.data();
-        params.partial_O   = partial_O_.data();
+        params.split_cnt   = split_cnt_.data() + part * stride_SC;
+        params.partial_ML  = partial_ML_.data() + part * stride_ML;
+        params.partial_O   = partial_O_.data() + part * stride_O;
         params.max_split_k = std::min(std::max(1, kMaxWorkspaceTokens / params.token_num), max_kv_splits);
 
         // context parallel
@@ -695,14 +707,10 @@ Tensor UnifiedAttentionLayer::core_attention(Tensor& qkv, const ForwardParam& p,
         if (params.cp_size > 1) {
             params.cp_size = cutlass::FastDivmod(params.cp_size);
 
-            // update ML,O offset if both prefill and decode present
-            const int offset_ML_stage =
-                engine_param_.attn_cp_size * (offset ? kMaxWorkspaceTokens * local_head_num * 2 : 0);
             const int offset_ML_rank = params.cp_rank * params.token_num * local_head_num * params.max_split_k * 2;
-            const int offset_O       = offset ? kMaxWorkspaceTokens * local_head_num * size_per_head : 0;
 
-            params.partial_ML = partial_ML_.data() + offset_ML_stage + offset_ML_rank;
-            params.partial_O  = partial_O_.data() + offset_O;
+            params.partial_ML = partial_ML_.data() + part * stride_ML + offset_ML_rank;
+            params.partial_O  = partial_O_.data() + part * stride_O;
             params.offset_q   = offset;
 
             // postprocess func
@@ -710,7 +718,7 @@ Tensor UnifiedAttentionLayer::core_attention(Tensor& qkv, const ForwardParam& p,
             params.cp_fn_ctx      = (void*)&cp_fn_ctx_;
             cp_fn_ctx_.cp_rank    = params.cp_rank;
             cp_fn_ctx_.count      = params.token_num * local_head_num * params.max_split_k * 2;
-            cp_fn_ctx_.partial_ML = partial_ML_.data() + offset_ML_stage;
+            cp_fn_ctx_.partial_ML = partial_ML_.data() + part * stride_ML;
             cp_fn_ctx_.stream     = stream;
         }
 
@@ -751,8 +759,9 @@ Tensor UnifiedAttentionLayer::core_attention(Tensor& qkv, const ForwardParam& p,
         a.window_size         = writer.window_size;
         a.qk_scale_log2       = writer.inv_sqrt_dh;
         a.rope                = writer.rope_param;
-        a.partial_o           = partial_O_.data();
-        a.partial_ml          = partial_ML_.data();
+        // Verification runs on the main stream, so it shares the `kMain` block.
+        a.partial_o           = partial_O_.data() + (size_t)AttnPartition::kMain * partial_O_.stride(0);
+        a.partial_ml          = partial_ML_.data() + (size_t)AttnPartition::kMain * partial_ML_.stride(0);
         a.data_type           = dtype;
         a.stream              = stream;
 
@@ -786,7 +795,7 @@ Tensor UnifiedAttentionLayer::core_attention(Tensor& qkv, const ForwardParam& p,
         const int offset = d.verification.request_count + d.decode.request_count;
         // We are executing prefill & decoding kernels concurrently, but only have 1 workspace
         // disable split kv for prefill for now
-        auto params = CreateParams(offset, d.prefill, 1, pf_stream);
+        auto params = CreateParams(offset, d.prefill, 1, pf_stream, AttnPartition::kPrefill);
         if constexpr (sizeof(T) == 2) {
             invokeProcessKV_v2_(params);
             TM_CUDA_CHECK(cudaGetLastError());
@@ -801,7 +810,7 @@ Tensor UnifiedAttentionLayer::core_attention(Tensor& qkv, const ForwardParam& p,
     }
 
     if (d.verification.request_count && !is_warm_up_) {
-        auto params = CreateParams(0, d.verification, kMaxKVSplits, dc_stream);
+        auto params = CreateParams(0, d.verification, kMaxKVSplits, dc_stream, AttnPartition::kMain);
         if constexpr (sizeof(T) == 2) {
             invokeProcessKV_v2_(params);
             TM_CUDA_CHECK(cudaGetLastError());
@@ -814,7 +823,7 @@ Tensor UnifiedAttentionLayer::core_attention(Tensor& qkv, const ForwardParam& p,
     if (d.decode.request_count && !is_warm_up_) {
         const int offset = d.verification.request_count;
         auto params = CreateParams(
-            offset, d.decode, d.verification.request_count ? 1 : kMaxKVSplits, dc_stream);
+            offset, d.decode, d.verification.request_count ? 1 : kMaxKVSplits, dc_stream, AttnPartition::kMain);
         if constexpr (sizeof(T) == 2) {
             dispatchDecoding<T>(params);
             TM_CUDA_CHECK(cudaGetLastError());
