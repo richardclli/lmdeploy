@@ -21,6 +21,7 @@
 
 #include "src/turbomind/engine/block.h"
 #include <algorithm>
+#include <cstdlib>
 #include <functional>
 #include <math.h>
 #include <numeric>
@@ -786,9 +787,18 @@ Tensor UnifiedAttentionLayer::core_attention(Tensor& qkv, const ForwardParam& p,
 
     const bool has_executor_attention = d.verification.request_count || d.decode.request_count;
     if (has_executor_attention && d.prefill.request_count) {
-        pf_stream = aux_stream_;
-        TM_CUDA_CHECK(cudaEventRecord(qkv_event_, stream));
-        TM_CUDA_CHECK(cudaStreamWaitEvent(aux_stream_, qkv_event_));
+        // Diagnostic / fallback switch: with TM_SPEC_SERIAL_PREFILL=1 the
+        // overlapping prefill is run on the main stream instead of the aux
+        // stream, removing the prefill<->decode/verify overlap.
+        static const bool serial_prefill = [] {
+            const char* e = std::getenv("TM_SPEC_SERIAL_PREFILL");
+            return e && *e && *e != '0';
+        }();
+        if (!serial_prefill) {
+            pf_stream = aux_stream_;
+            TM_CUDA_CHECK(cudaEventRecord(qkv_event_, stream));
+            TM_CUDA_CHECK(cudaStreamWaitEvent(aux_stream_, qkv_event_));
+        }
     }
 
     if (d.prefill.request_count && !is_warm_up_) {
