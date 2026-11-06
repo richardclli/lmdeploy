@@ -4,9 +4,11 @@
 
 #include "src/turbomind/comm/host_comm.h"
 #include "src/turbomind/core/copy.h"
+#include "src/turbomind/core/logger.h"
 #include "src/turbomind/engine/request.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <numeric>
 
 namespace turbomind {
@@ -85,6 +87,41 @@ void FixedChainSetup::Setup(int phase, const Buffer_<Sequence*>& requests, core:
 
     copy(extension, batch_size + 1, data.draft_extension_q_offsets);
     copy(limit_to_accept_len_host_, batch_size, data.limit_to_accept_len);
+
+    if (const char* d = std::getenv("TM_SPEC_DUMP"); d && d[0] && d[0] != '0') {
+        TM_LOG_WARN("[spec-geom] ph={} bsz={} ext_q={} ext_glob={} rdec(r={},q={}) rpf(r={},q={}) "
+                    "edec(r={},q={},maxq={},kcap={},maxk={})",
+                    phase,
+                    batch_size,
+                    data.draft_extension_query_count,
+                    data.draft_extension_global_query_count,
+                    data.refresh_decode.request_count,
+                    data.refresh_decode.query_count,
+                    data.refresh_prefill.request_count,
+                    data.refresh_prefill.query_count,
+                    data.extension_decode.request_count,
+                    data.extension_decode.query_count,
+                    data.extension_decode.max_query_length,
+                    data.extension_decode.key_capacity_sum,
+                    data.extension_decode.max_key_capacity);
+        for (int b = 0; b < batch_size; ++b) {
+            const auto& r   = *requests[b];
+            const auto& row = *r.submitted;
+            TM_LOG_WARN("[spec-geom]  b={} seq_len={} prompt={} in_len={} qcnt={} kcap_end={} cw_end={} "
+                        "vpos={} ext_cand={} autoregres={} ext_off={}",
+                        b,
+                        r.seq_len,
+                        r.prompt_len,
+                        row.input_len,
+                        row.query_count,
+                        row.key_capacity_end,
+                        row.cache_write_end,
+                        row.verification_positions,
+                        (int)row.is_extension_candidate(),
+                        (int)row.autoregres,
+                        extension[b + 1] - extension[b]);
+        }
+    }
 }
 
 }  // namespace turbomind
