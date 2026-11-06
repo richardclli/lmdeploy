@@ -118,6 +118,10 @@ void MoeFfnDefaultImpl::Forward(MoeFfnLayer::ForwardParam& p)
     const int   tokens = p.input.shape(0);
     const auto& moe    = *p.weights;
 
+    // M3: the per-layer routing scratch (f2n_/f2E_/en2f_/scales_/masks_) is sized
+    // from max_token_num_; a larger batch would silently write out of bounds.
+    TM_CHECK_LE(tokens, max_token_num_) << "MoE FFN token count " << tokens << " exceeds scratch capacity " << max_token_num_;
+
     const auto& block = *TM_CHECK_NOTNULL(moe.block());
 
     const int hidden_dim = block.hidden_dim;
