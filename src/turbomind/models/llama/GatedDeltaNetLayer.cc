@@ -678,8 +678,14 @@ void GatedDeltaNetLayer::Forward(ForwardParam param)
         recurrent_args.state_layer_offset = state_layer_offset;
     }
 
-    const bool has_main     = phase_data.verify_plan.has_value() || phase_data.recurrent_plan.has_value();
-    const bool fork_chunked = has_main && phase_data.chunked_plan.has_value();
+    const bool has_main = phase_data.verify_plan.has_value() || phase_data.recurrent_plan.has_value();
+    // Diagnostic / fallback switch (shared with the attention layer): run the
+    // chunked prefill on the main stream to remove the aux-stream overlap.
+    static const bool serial_prefill = [] {
+        const char* e = std::getenv("TM_SPEC_SERIAL_PREFILL");
+        return e && *e && *e != '0';
+    }();
+    const bool fork_chunked = has_main && phase_data.chunked_plan.has_value() && !serial_prefill;
     if (fork_chunked) {
         TM_CUDA_CHECK(cudaEventRecord(ev_before_, stream));
         TM_CUDA_CHECK(cudaStreamWaitEvent(aux_stream_, ev_before_));
