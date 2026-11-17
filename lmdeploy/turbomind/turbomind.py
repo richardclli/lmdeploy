@@ -299,6 +299,26 @@ class TurboMind:
         ec.spec_method = spec_method
         ec.spec_num_draft_tokens = spec_num_draft_tokens
         ec.spec_tap_layer_ids = spec_tap_layer_ids
+        if spec_method == 'dflash2' and draft_model is not None:
+            dc = getattr(draft_model.cfg, 'dflash_config', {}) or {}
+            dc = dc if isinstance(dc, dict) else vars(dc)
+            ec.spec_block_size = int(dc.get('block_size', 8))
+            ec.spec_mask_token_id = int(dc.get('mask_token_id', 0))
+            ec.spec_selector_top_k = int(dc.get('selector_top_k', 16))
+            ec.spec_selector_rank = int(dc.get('selector_rank', 256))
+            ec.spec_conv_kernel_size = int(dc.get('conv_kernel_size', 2))
+            ec.spec_conv_group_size = int(dc.get('conv_group_size', 16))
+            ec.spec_sliding_window = int(getattr(draft_model.cfg, 'sliding_window', 0) or 0)
+            rp = getattr(draft_model.cfg, 'rope_parameters', {}) or {}
+            rp = rp if isinstance(rp, dict) else vars(rp)
+            rope_type = rp.get('rope_type', 'default')
+            if rope_type not in (None, 'default'):
+                raise ValueError(f'DFlash2 supports only default NeoX RoPE, got rope_type={rope_type!r}')
+            ec.spec_rope_theta = float(rp.get('rope_theta', 0) or 0)
+            if speculative_config.dflash_ctx_kv_int4 is not None:
+                ec.spec_ctx_kv_int4 = int(speculative_config.dflash_ctx_kv_int4)
+            else:
+                ec.spec_ctx_kv_int4 = int(dc.get('ctx_kv_int4', 0))
 
         logger.info(f'turbomind engine config:\n\n'
                     f'dtype={engine_config.dtype}, state_dtype={state_dtype}, '
