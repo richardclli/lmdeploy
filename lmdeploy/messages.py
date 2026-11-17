@@ -868,11 +868,14 @@ class SpeculativeConfig:
         dflash_block_size: DFlash query/verify window length. When set, this
             DFlash-specific value overrides ``num_speculative_tokens`` using
             ``num_speculative_tokens = dflash_block_size - 1``.
+        dflash_ctx_kv_int4: DFlash2 only. Store the draft context KV in int4 to
+            reduce VRAM. ``None`` keeps the engine default (off).
     """
     method: str
     model: str = ''
     num_speculative_tokens: int = 1
     dflash_block_size: int | None = None
+    dflash_ctx_kv_int4: bool | None = None
 
     def __post_init__(self):
         """Resolve the DFlash block-size override."""
@@ -884,3 +887,6 @@ class SpeculativeConfig:
             # DFlash's complete query contains the current/next target token in
             # slot zero followed by the newly proposed draft tokens.
             self.num_speculative_tokens = self.dflash_block_size - 1
+        if self.dflash_ctx_kv_int4 is not None:
+            if self.method != 'dflash2':
+                raise ValueError('dflash_ctx_kv_int4 is supported only when method="dflash2".')
