@@ -506,6 +506,10 @@ void invokeDflash2KvScatter(void* dst, const void* src, const int* base, const i
         kv_scatter_kernel<__half><<<grid, block, 0, stream>>>(
             static_cast<__half*>(dst), static_cast<const __half*>(src), base, committed, rows, per_row);
     }
+    else if (input_bits == 8) {
+        kv_scatter_kernel<__nv_bfloat16><<<grid, block, 0, stream>>>(
+            static_cast<__nv_bfloat16*>(dst), static_cast<const __nv_bfloat16*>(src), base, committed, rows, per_row);
+    }
     else if (input_bits == 32) {
         kv_scatter_kernel<float><<<grid, block, 0, stream>>>(
             static_cast<float*>(dst), static_cast<const float*>(src), base, committed, rows, per_row);
@@ -629,6 +633,9 @@ void invokeDflash2Rope(void*        x,
     if (input_bits == 16) {
         launch_rope<__half>(x, positions, rows, heads, head_dim, base, stream);
     }
+    else if (input_bits == 8) {
+        launch_rope<__nv_bfloat16>(x, positions, rows, heads, head_dim, base, stream);
+    }
     else if (input_bits == 32) {
         launch_rope<float>(x, positions, rows, heads, head_dim, base, stream);
     }
@@ -661,6 +668,11 @@ void invokeDflash2Add(void*        out,
     if (input_bits == 16) {
         add_kernel<__half><<<grid, block, 0, stream>>>(
             static_cast<__half*>(out), static_cast<const __half*>(a), static_cast<const __half*>(b), n);
+    }
+    else if (input_bits == 8) {
+        add_kernel<__nv_bfloat16><<<grid, block, 0, stream>>>(
+            static_cast<__nv_bfloat16*>(out), static_cast<const __nv_bfloat16*>(a),
+            static_cast<const __nv_bfloat16*>(b), n);
     }
     else if (input_bits == 32) {
         add_kernel<float><<<grid, block, 0, stream>>>(
@@ -758,6 +770,10 @@ void invokeDflash2TopK(int*         candidate_ids,
     if (input_bits == 16) {
         topk_kernel<__half, 16><<<rows, 256, 256 * 16 * (sizeof(float) + sizeof(int)), stream>>>(
             candidate_ids, values, static_cast<const __half*>(logits), rows, vocab);
+    }
+    else if (input_bits == 8) {
+        topk_kernel<__nv_bfloat16, 16><<<rows, 256, 256 * 16 * (sizeof(float) + sizeof(int)), stream>>>(
+            candidate_ids, values, static_cast<const __nv_bfloat16*>(logits), rows, vocab);
     }
     else if (input_bits == 32) {
         topk_kernel<float, 16><<<rows, 256, 256 * 16 * (sizeof(float) + sizeof(int)), stream>>>(

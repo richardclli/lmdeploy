@@ -93,6 +93,7 @@ DspineModel::DspineModel(const SpeculativeModelArgs& args):
     causal_        = std::getenv("DSPINE_NONCAUSAL") ? 0 : 1;
     no_delta_      = std::getenv("DSPINE_NO_DELTA") ? 1 : 0;
     top1_          = std::getenv("DSPINE_TOP1") ? 1 : 0;
+    no_context_    = std::getenv("DSPINE_NO_CONTEXT") ? 1 : 0;
 
     if (dw.data_type == kFloat16) {
         dtype_code_ = 1;
@@ -103,7 +104,6 @@ DspineModel::DspineModel(const SpeculativeModelArgs& args):
     else {
         dtype_code_ = 2;
     }
-    TM_CHECK(dtype_code_ != 0) << "DSpine draft requires an fp16 or fp32 engine dtype in v1";
 
     const DataType dtype  = dw.data_type;
     ctx_k_.resize(dw.num_layer);
@@ -145,6 +145,7 @@ void DspineModel::MaterializeContext(const Tensor& context_hidden, const Buffer_
     auto&       lin = *ctx_.linear;
     const float eps = spec_weights_.hidden_norm->norm_eps_;
     const bool  zc  = spec_weights_.hidden_norm->zero_centered_;
+    const int bits = dtype_code_ == 0 ? 8 : (dtype_code_ == 1 ? 16 : 32);
 
     Buffer_<int> pos_dev{rows, kDEVICE};
     invokeDflash2CountUp(pos_dev.data(), base_dev.data(), rows, stream);
@@ -172,11 +173,11 @@ void DspineModel::MaterializeContext(const Tensor& context_hidden, const Buffer_
         Tensor vc{{rows, local_nkv_, hd_}, dw.data_type, kDEVICE};
         GenericCopy(krow, kc, stream);
         GenericCopy(vrow, vc, stream);
-        invokeDflash2Rope(kc.raw_data(), pos_dev.data(), rows, local_nkv_, hd_, rope_base_, 16, stream);
+        invokeDflash2Rope(kc.raw_data(), pos_dev.data(), rows, local_nkv_, hd_, rope_base_, bits, stream);
         invokeDflash2KvScatter(ctx_k_[l].raw_data(), kc.raw_data(), base_dev.data(), committed_dev.data(), rows,
-                               per_row, 16, stream);
+                               per_row, bits, stream);
         invokeDflash2KvScatter(ctx_v_[l].raw_data(), vc.raw_data(), base_dev.data(), committed_dev.data(), rows,
-                               per_row, 16, stream);
+                               per_row, bits, stream);
     }
 }
 
@@ -187,6 +188,7 @@ Tensor DspineModel::RunBlock(const Tensor& block_embeddings, const Tensor& posit
     auto&          lin   = *ctx_.linear;
     const DataType dtype = dw.data_type;
     const float    qscale = 1.0f / std::sqrt((float)hd_);
+    const int bits = dtype_code_ == 0 ? 8 : (dtype_code_ == 1 ? 16 : 32);
     const float    sqrt_c = std::sqrt((float)code_size_);
     const int      R      = rank_;
 
@@ -239,10 +241,11 @@ Tensor DspineModel::RunBlock(const Tensor& block_embeddings, const Tensor& posit
         GenericCopy(qv, q2, stream);
         GenericCopy(kv, k2, stream);
         GenericCopy(vv, v2, stream);
-        invokeDflash2Rope(q2.raw_data(), positions.data<int>(), rows, local_nh_, hd_, rope_base_, 16, stream);
-        invokeDflash2Rope(k2.raw_data(), positions.data<int>(), rows, local_nkv_, hd_, rope_base_, 16, stream);
-        Tensor kctx = ctx_k_[l].slice({0, 0, 0}, {ctx_rows, local_nkv_, hd_});
-        Tensor vctx = ctx_v_[l].slice({0, 0, 0}, {ctx_rows, local_nkv_, hd_});
+        invokeDflash2Rope(q2.raw_data(), positions.data<int>(), rows, local_nh_, hd_, rope_base_, bits, stream);
+        invokeDflash2Rope(k2.raw_data(), positions.data<int>(), rows, local_nkv_, hd_, rope_base_, bits, stream);
+        const int ctx_use = no_context_ ? 0 : ctx_rows;
+        Tensor kctx = ctx_k_[l].slice({0, 0, 0}, {ctx_use, local_nkv_, hd_});
+        Tensor vctx = ctx_v_[l].slice({0, 0, 0}, {ctx_use, local_nkv_, hd_});
         invokeDspineAttention(attn.raw_data(),
                               q2.raw_data(),
                               kctx.raw_data(),
@@ -250,7 +253,7 @@ Tensor DspineModel::RunBlock(const Tensor& block_embeddings, const Tensor& posit
                               k2.raw_data(),
                               v2.raw_data(),
                               rows,
-                              ctx_rows,
+                              ctx_use,
                               local_nh_,
                               local_nkv_,
                               hd_,
@@ -261,7 +264,7 @@ Tensor DspineModel::RunBlock(const Tensor& block_embeddings, const Tensor& posit
                               stream);
         lin.Forward(attn.view({rows, local_nh_ * hd_}), *a->wo, o);
         allreduce(o);
-        invokeDflash2Add(h.raw_data(), residual.raw_data(), o.raw_data(), (long long)rows * hidden_, 16, stream);
+        invokeDflash2Add(h.raw_data(), residual.raw_data(), o.raw_data(), (long long)rows * hidden_, bits, stream);
 
         invokeRMSNorm(x, h, layer->ffn_norm->weight, layer->ffn_norm->norm_eps_, layer->ffn_norm->zero_centered_,
                       stream);
@@ -283,7 +286,7 @@ Tensor DspineModel::RunBlock(const Tensor& block_embeddings, const Tensor& posit
             TM_CHECK(false) << "DSpine draft layer has no feed-forward weights";
         }
         allreduce(down);
-        invokeDflash2Add(cur_out.raw_data(), h.raw_data(), down.raw_data(), (long long)rows * hidden_, 16, stream);
+        invokeDflash2Add(cur_out.raw_data(), h.raw_data(), down.raw_data(), (long long)rows * hidden_, bits, stream);
 
         const NormWeight* next_norm = (l + 1 < dw.num_layer) ? dw.layer(l + 1)->attention_norm.get() : dw.norm.get();
 
@@ -334,6 +337,7 @@ void DspineModel::RunDraft(int phase, const DraftContext& ctx, TensorMap& env)
     const auto&    dw     = draft_.weights();
     const auto     stream = core::Context::stream().handle();
     const DataType dtype  = dw.data_type;
+    const int bits = dtype_code_ == 0 ? 8 : (dtype_code_ == 1 ? 16 : 32);
 
     Tensor context_hidden = projection_->ProjectAndGather(phase, stream);
     const int rows = context_hidden.shape(0);
@@ -377,7 +381,7 @@ void DspineModel::RunDraft(int phase, const DraftContext& ctx, TensorMap& env)
 
     Buffer_<int>   cand{L * top_k_, kDEVICE};
     Buffer_<float> values{L * top_k_, kDEVICE};  // top-k logits (candidates only)
-    invokeDflash2TopK(cand.data(), values.data(), logits.raw_data(), L, vocab, top_k_, 16, stream);
+    invokeDflash2TopK(cand.data(), values.data(), logits.raw_data(), L, vocab, top_k_, bits, stream);
 
     // The refinement base uses the PRE-write residual (the layer output before
     // the bridge delta), normalized by the draft final norm and scored by the

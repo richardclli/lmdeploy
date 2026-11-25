@@ -62,6 +62,7 @@ private:
     int   causal_{1};
     int   no_delta_{0};
     int   top1_{0};
+    int   no_context_{0};
 
     std::vector<Tensor> ctx_k_;
     std::vector<Tensor> ctx_v_;
