@@ -1208,6 +1208,17 @@ void invokeDflash2KvScatterInt4(void*        dst_data,
             nkv,
             hd);
     }
+    else if (input_bits == 8) {
+        kv_scatter_int4_kernel<__nv_bfloat16><<<grid, block, 0, stream>>>(
+            static_cast<unsigned char*>(dst_data),
+            static_cast<__nv_bfloat16*>(dst_param),
+            static_cast<const __nv_bfloat16*>(src),
+            base,
+            committed,
+            rows,
+            nkv,
+            hd);
+    }
     else {
         TM_CHECK(false) << "DFlash2 kv_scatter int4: unsupported input bits " << input_bits;
     }

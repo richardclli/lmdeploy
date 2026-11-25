@@ -72,6 +72,11 @@ private:
 
     std::vector<Tensor> ctx_k_;
     std::vector<Tensor> ctx_v_;
+    bool                ctx_kv_int4_{false};
+    std::vector<Tensor> ctx_k_data_;
+    std::vector<Tensor> ctx_k_param_;
+    std::vector<Tensor> ctx_v_data_;
+    std::vector<Tensor> ctx_v_param_;
     Buffer_<int>        ctx_len_;
 
     // Last bridge write's pre-write state, consumed by the refinement tail.

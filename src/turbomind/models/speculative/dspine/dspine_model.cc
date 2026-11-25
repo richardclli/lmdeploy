@@ -134,14 +134,39 @@ DspineModel::DspineModel(const SpeculativeModelArgs& args):
     }
 
     const DataType dtype  = dw.data_type;
-    ctx_k_.resize(dw.num_layer);
-    ctx_v_.resize(dw.num_layer);
-    const size_t bytes = (size_t)max_ctx_ * local_nkv_ * hd_ * byte_size(dtype);
-    for (int l = 0; l < dw.num_layer; ++l) {
-        ctx_k_[l] = Tensor{{max_ctx_, local_nkv_, hd_}, dtype, kDEVICE};
-        ctx_v_[l] = Tensor{{max_ctx_, local_nkv_, hd_}, dtype, kDEVICE};
-        cudaMemsetAsync(ctx_k_[l].raw_data(), 0, bytes, 0);
-        cudaMemsetAsync(ctx_v_[l].raw_data(), 0, bytes, 0);
+    ctx_kv_int4_ = param_.spec_ctx_kv_int4 != 0;
+    if (ctx_kv_int4_ && hd_ != 128) {
+        TM_LOG_WARN("DSpine int4 draft context KV requires head_dim 128; falling back to BF16");
+        ctx_kv_int4_ = false;
+    }
+    if (ctx_kv_int4_) {
+        ctx_k_data_.resize(dw.num_layer);
+        ctx_k_param_.resize(dw.num_layer);
+        ctx_v_data_.resize(dw.num_layer);
+        ctx_v_param_.resize(dw.num_layer);
+        const size_t data_bytes  = (size_t)max_ctx_ * local_nkv_ * (hd_ / 2);
+        const size_t param_bytes = (size_t)max_ctx_ * local_nkv_ * 2 * byte_size(dtype);
+        for (int l = 0; l < dw.num_layer; ++l) {
+            ctx_k_data_[l]  = Tensor{{max_ctx_, local_nkv_, hd_ / 2}, kUint8, kDEVICE};
+            ctx_k_param_[l] = Tensor{{max_ctx_, local_nkv_, 2}, dtype, kDEVICE};
+            ctx_v_data_[l]  = Tensor{{max_ctx_, local_nkv_, hd_ / 2}, kUint8, kDEVICE};
+            ctx_v_param_[l] = Tensor{{max_ctx_, local_nkv_, 2}, dtype, kDEVICE};
+            cudaMemsetAsync(ctx_k_data_[l].raw_data(), 0, data_bytes, 0);
+            cudaMemsetAsync(ctx_k_param_[l].raw_data(), 0, param_bytes, 0);
+            cudaMemsetAsync(ctx_v_data_[l].raw_data(), 0, data_bytes, 0);
+            cudaMemsetAsync(ctx_v_param_[l].raw_data(), 0, param_bytes, 0);
+        }
+    }
+    else {
+        ctx_k_.resize(dw.num_layer);
+        ctx_v_.resize(dw.num_layer);
+        const size_t bytes = (size_t)max_ctx_ * local_nkv_ * hd_ * byte_size(dtype);
+        for (int l = 0; l < dw.num_layer; ++l) {
+            ctx_k_[l] = Tensor{{max_ctx_, local_nkv_, hd_}, dtype, kDEVICE};
+            ctx_v_[l] = Tensor{{max_ctx_, local_nkv_, hd_}, dtype, kDEVICE};
+            cudaMemsetAsync(ctx_k_[l].raw_data(), 0, bytes, 0);
+            cudaMemsetAsync(ctx_v_[l].raw_data(), 0, bytes, 0);
+        }
     }
     cudaDeviceSynchronize();
     ctx_len_ = {param_.max_batch_size, kDEVICE};
@@ -210,10 +235,18 @@ void DspineModel::MaterializeContext(const Tensor& context_hidden, const Buffer_
             dump_devd(dump_dir_ + "/ctx_vc", vc.raw_data(), vc.byte_size(), stream);
             dump_devd(dump_dir_ + "/ctx_k0", ctx_k_[0].raw_data(), (size_t)rows * per_row * byte_size(dw.data_type), stream);
         }
-        invokeDflash2KvScatter(ctx_k_[l].raw_data(), kc.raw_data(), base_dev.data(), committed_dev.data(), rows,
-                               per_row, bits, stream);
-        invokeDflash2KvScatter(ctx_v_[l].raw_data(), vc.raw_data(), base_dev.data(), committed_dev.data(), rows,
-                               per_row, bits, stream);
+        if (ctx_kv_int4_) {
+            invokeDflash2KvScatterInt4(ctx_k_data_[l].raw_data(), ctx_k_param_[l].raw_data(), kc.raw_data(),
+                                       base_dev.data(), committed_dev.data(), rows, local_nkv_, hd_, bits, stream);
+            invokeDflash2KvScatterInt4(ctx_v_data_[l].raw_data(), ctx_v_param_[l].raw_data(), vc.raw_data(),
+                                       base_dev.data(), committed_dev.data(), rows, local_nkv_, hd_, bits, stream);
+        }
+        else {
+            invokeDflash2KvScatter(ctx_k_[l].raw_data(), kc.raw_data(), base_dev.data(), committed_dev.data(), rows,
+                                   per_row, bits, stream);
+            invokeDflash2KvScatter(ctx_v_[l].raw_data(), vc.raw_data(), base_dev.data(), committed_dev.data(), rows,
+                                   per_row, bits, stream);
+        }
     }
 }
 
@@ -280,24 +313,35 @@ Tensor DspineModel::RunBlock(const Tensor& block_embeddings, const Tensor& posit
         invokeDflash2Rope(q2.raw_data(), positions.data<int>(), rows, local_nh_, hd_, rope_base_, bits, stream);
         invokeDflash2Rope(k2.raw_data(), positions.data<int>(), rows, local_nkv_, hd_, rope_base_, bits, stream);
         const int ctx_use = no_context_ ? 0 : ctx_rows;
-        Tensor kctx = ctx_k_[l].slice({0, 0, 0}, {ctx_use, local_nkv_, hd_});
-        Tensor vctx = ctx_v_[l].slice({0, 0, 0}, {ctx_use, local_nkv_, hd_});
-        invokeDspineAttention(attn.raw_data(),
-                              q2.raw_data(),
-                              kctx.raw_data(),
-                              vctx.raw_data(),
-                              k2.raw_data(),
-                              v2.raw_data(),
-                              rows,
-                              ctx_use,
-                              local_nh_,
-                              local_nkv_,
-                              hd_,
-                              qscale,
-                              window_,
-                              causal_,
-                              dtype_code_,
-                              stream);
+        if (ctx_kv_int4_) {
+            Tensor kd = ctx_k_data_[l].slice({0, 0, 0}, {ctx_use, local_nkv_, hd_ / 2});
+            Tensor kp = ctx_k_param_[l].slice({0, 0, 0}, {ctx_use, local_nkv_, 2});
+            Tensor vd = ctx_v_data_[l].slice({0, 0, 0}, {ctx_use, local_nkv_, hd_ / 2});
+            Tensor vp = ctx_v_param_[l].slice({0, 0, 0}, {ctx_use, local_nkv_, 2});
+            invokeDspineAttentionInt4(attn.raw_data(), q2.raw_data(), kd.raw_data(), kp.raw_data(), vd.raw_data(),
+                                      vp.raw_data(), k2.raw_data(), v2.raw_data(), rows, ctx_use, local_nh_,
+                                      local_nkv_, hd_, qscale, window_, causal_, dtype_code_, stream);
+        }
+        else {
+            Tensor kctx = ctx_k_[l].slice({0, 0, 0}, {ctx_use, local_nkv_, hd_});
+            Tensor vctx = ctx_v_[l].slice({0, 0, 0}, {ctx_use, local_nkv_, hd_});
+            invokeDspineAttention(attn.raw_data(),
+                                  q2.raw_data(),
+                                  kctx.raw_data(),
+                                  vctx.raw_data(),
+                                  k2.raw_data(),
+                                  v2.raw_data(),
+                                  rows,
+                                  ctx_use,
+                                  local_nh_,
+                                  local_nkv_,
+                                  hd_,
+                                  qscale,
+                                  window_,
+                                  causal_,
+                                  dtype_code_,
+                                  stream);
+        }
         if (l == 0 && !dump_dir_.empty() && dump_round_ == 0) {
             dump_devd(dump_dir_ + "/blk_q", q2.raw_data(), q2.byte_size(), stream);
             dump_devd(dump_dir_ + "/blk_k", k2.raw_data(), k2.byte_size(), stream);

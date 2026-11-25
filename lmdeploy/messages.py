@@ -888,5 +888,5 @@ class SpeculativeConfig:
             # slot zero followed by the newly proposed draft tokens.
             self.num_speculative_tokens = self.dflash_block_size - 1
         if self.dflash_ctx_kv_int4 is not None:
-            if self.method != 'dflash2':
-                raise ValueError('dflash_ctx_kv_int4 is supported only when method="dflash2".')
+            if self.method not in ('dflash2', 'dspine'):
+                raise ValueError('dflash_ctx_kv_int4 is supported only when method="dflash2"/"dspine".')

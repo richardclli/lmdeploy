@@ -110,4 +110,25 @@ void invokeDspineRefine(int*         tokens,
 /// Deterministic top-1 proposal (debug): tokens[i] = cand[i, 0].
 void invokeDspineTop1(int* tokens, const int* cand, int n, int top_k, cudaStream_t stream);
 
+/// Causal int4 context-KV block attention (context K/V packed int4 with
+/// per-(token,head) scale/zero; block K/V in the compute dtype).
+void invokeDspineAttentionInt4(void*        out,
+                               const void*  q,
+                               const void*  k_ctx_data,
+                               const void*  k_ctx_param,
+                               const void*  v_ctx_data,
+                               const void*  v_ctx_param,
+                               const void*  k_blk,
+                               const void*  v_blk,
+                               int          tq,
+                               int          tc,
+                               int          nh,
+                               int          nkv,
+                               int          hd,
+                               float        scale,
+                               int          window,
+                               int          causal,
+                               int          dtype,
+                               cudaStream_t stream);
+
 }  // namespace turbomind

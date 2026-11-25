@@ -159,6 +159,42 @@ void BindDspineKernels(py::module_& module)
         },
         py::arg("out"), py::arg("normalized"), py::arg("raw"), py::arg("delta"), py::arg("rms"),
         py::arg("next_norm_weight"), py::arg("block"), py::arg("eps"), py::arg("stream_ptr"));
+    module.def(
+        "dspine_attention_int4",
+        [](py::handle out_obj, py::handle q_obj, py::handle kd_obj, py::handle kp_obj, py::handle vd_obj,
+           py::handle vp_obj, py::handle kb_obj, py::handle vb_obj, float scale, int window, int causal,
+           uintptr_t stream_ptr) {
+            CudaDeviceGuard guard{GetCudaOrdinal(q_obj)};
+            auto out = detail::ConsumeDLPackWithStrides(out_obj, stream_ptr);
+            auto q   = detail::ConsumeDLPackWithStrides(q_obj, stream_ptr);
+            auto kd  = detail::ConsumeDLPackWithStrides(kd_obj, stream_ptr);
+            auto kp  = detail::ConsumeDLPackWithStrides(kp_obj, stream_ptr);
+            auto vd  = detail::ConsumeDLPackWithStrides(vd_obj, stream_ptr);
+            auto vp  = detail::ConsumeDLPackWithStrides(vp_obj, stream_ptr);
+            auto kb  = detail::ConsumeDLPackWithStrides(kb_obj, stream_ptr);
+            auto vb  = detail::ConsumeDLPackWithStrides(vb_obj, stream_ptr);
+            invokeDspineAttentionInt4(out.data_or(static_cast<void*>(nullptr)),
+                                      q.data_or(static_cast<const void*>(nullptr)),
+                                      kd.data_or(static_cast<const void*>(nullptr)),
+                                      kp.data_or(static_cast<const void*>(nullptr)),
+                                      vd.data_or(static_cast<const void*>(nullptr)),
+                                      vp.data_or(static_cast<const void*>(nullptr)),
+                                      kb.data_or(static_cast<const void*>(nullptr)),
+                                      vb.data_or(static_cast<const void*>(nullptr)),
+                                      static_cast<int>(q.shape(0)),
+                                      static_cast<int>(kd.shape(0)),
+                                      static_cast<int>(q.shape(1)),
+                                      static_cast<int>(kd.shape(1)),
+                                      static_cast<int>(q.shape(2)),
+                                      scale,
+                                      window,
+                                      causal,
+                                      CodeOf(q),
+                                      reinterpret_cast<cudaStream_t>(stream_ptr));
+        },
+        py::arg("out"), py::arg("q"), py::arg("k_ctx_data"), py::arg("k_ctx_param"), py::arg("v_ctx_data"),
+        py::arg("v_ctx_param"), py::arg("k_blk"), py::arg("v_blk"), py::arg("scale"), py::arg("window"),
+        py::arg("causal"), py::arg("stream_ptr"));
 }
 
 }  // namespace turbomind::python
