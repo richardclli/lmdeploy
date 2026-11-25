@@ -21,6 +21,7 @@ pybind11_add_module(${PROJECT_NAME}
     ../kernels/speculative_sampling_python_bind.cpp
     ../kernels/draft_carry_python_bind.cpp
     ../kernels/dflash2/dflash2_python_bind.cpp
+    ../kernels/dspine/dspine_python_bind.cpp
     ../models/speculative/eagle3/target_hidden_projection_python_bind.cpp
     ../kernels/speculative_sequence_python_bind.cpp
     ../kernels/attention/verification/python_bind.cpp)

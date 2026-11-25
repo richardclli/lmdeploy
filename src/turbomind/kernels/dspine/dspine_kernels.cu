@@ -52,7 +52,7 @@ __device__ __forceinline__ void from_f<__nv_bfloat16>(__nv_bfloat16& dst, float 
 __device__ __forceinline__ float warp_reduce_sum(float x)
 {
     for (int offset = 16; offset > 0; offset /= 2) {
-        x += __shfl_down_sync(0xffffffff, x, offset);
+        x += __shfl_xor_sync(0xffffffff, x, offset);
     }
     return x;
 }

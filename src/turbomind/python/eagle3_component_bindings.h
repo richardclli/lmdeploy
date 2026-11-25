@@ -14,4 +14,6 @@ void BindSpeculativeSequence(pybind11::module_& module);
 
 void BindDflash2Kernels(pybind11::module_& module);
 
+void BindDspineKernels(pybind11::module_& module);
+
 }  // namespace turbomind::python

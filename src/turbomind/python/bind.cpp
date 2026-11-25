@@ -1064,6 +1064,7 @@ PYBIND11_MODULE(_turbomind, m)
     turbomind::python::BindSpeculativeSampling(m);
     turbomind::python::BindDraftCarry(m);
     turbomind::python::BindDflash2Kernels(m);
+    turbomind::python::BindDspineKernels(m);
     turbomind::python::BindTargetHiddenProjection(m);
     turbomind::python::BindSpeculativeSequence(m);
     turbomind::python::BindVerificationAttention(m);
