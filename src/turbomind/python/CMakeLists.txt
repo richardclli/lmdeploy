@@ -29,6 +29,7 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     speculative_sampling_kernels
     draft_carry_kernels
     dflash2_kernels
+    dspine_kernels
     target_hidden_projection_kernels
     speculative_sequence_kernels
     verification_attention

@@ -7,10 +7,13 @@ namespace turbomind::core {
 
 struct DecoderLayerConfig: ModuleConfig {
     DecoderLayerConfig(): ModuleConfig{"DecoderLayerWeight"} {}
-    template<typename Visitor>
-    static void for_each(Visitor&&)
-    {
-    }
+
+#define DECODER_LAYER_CONFIG_FIELDS(X) X(DataType, data_type)
+
+    DECODER_LAYER_CONFIG_FIELDS(TM_MEMBER)
+    TM_FOR_EACH(DecoderLayerConfig, DECODER_LAYER_CONFIG_FIELDS)
+
+#undef DECODER_LAYER_CONFIG_FIELDS
 };
 
 }  // namespace turbomind::core
@@ -23,6 +26,7 @@ class FfnWeight;
 class MoeWeight;
 class NormWeight;
 class GroupedConvWeight;
+class LinearWeight;
 
 /// Architecture-independent decoder layer weight composite.
 class DecoderLayerWeight: public core::Module {
@@ -48,7 +52,9 @@ public:
     X(NormWeight, attention_norm)                                                                                      \
     X(NormWeight, ffn_norm)                                                                                            \
     X(GroupedConvWeight, attention_conv)                                                                              \
-    X(GroupedConvWeight, mlp_conv)
+    X(GroupedConvWeight, mlp_conv)                                                                                    \
+    X(LinearWeight, bridge_read)                                                                                      \
+    X(LinearWeight, bridge_write)
 
 #define DECODER_LAYER_WEIGHT_PARAMS(X)
 

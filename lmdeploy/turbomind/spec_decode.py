@@ -27,6 +27,7 @@ class DraftWeightSpec:
 DRAFT_WEIGHT_SPECS: dict[str, DraftWeightSpec] = {
     'eagle3': DraftWeightSpec(input_model='qwen3-eagle3', weight_source='sidecar'),
     'dflash2': DraftWeightSpec(input_model='qwen3-dflash2', weight_source='sidecar'),
+    'dspine': DraftWeightSpec(input_model='qwen3-dspine', weight_source='sidecar'),
 }
 
 
@@ -91,5 +92,9 @@ def build_draft_model(speculative_config,
         raise NotImplementedError(f'quantized draft weights are not supported yet ({method!r})')
     resolver = WeightFormatResolver(formats=[*quant_formats, TrivialFormat(weight_dtype=engine_data_type)])
 
-    model = INPUT_MODELS.get(spec.input_model)(draft_config, resolver=resolver, prefix=spec.prefix)
+    factory = INPUT_MODELS.get(spec.input_model)
+    kwargs = dict(resolver=resolver, prefix=spec.prefix)
+    if spec.input_model == 'qwen3-dspine':
+        kwargs['target_model_path'] = target_model_path
+    model = factory(draft_config, **kwargs)
     return model, path

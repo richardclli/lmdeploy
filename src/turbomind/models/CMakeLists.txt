@@ -26,6 +26,8 @@ add_library(models STATIC
         speculative/dflash2/candidate_selector_weight.cc
         speculative/dflash2/dflash2_model_weight.cc
         speculative/dflash2/dflash2_model.cc
+        speculative/dspine/dspine_model_weight.cc
+        speculative/dspine/dspine_model.cc
         linear_weight.cc
         norm_weight.cc
         layer_norm_weight.cc

@@ -313,6 +313,19 @@ class TurboMind:
                 ec.spec_ctx_kv_int4 = int(speculative_config.dflash_ctx_kv_int4)
             else:
                 ec.spec_ctx_kv_int4 = int(dc.get('ctx_kv_int4', 0))
+        elif spec_method == 'dspine' and draft_model is not None:
+            dc = getattr(draft_model.cfg, 'dflash_config', {}) or {}
+            dc = dc if isinstance(dc, dict) else vars(dc)
+            bridge = dc.get('selected_prefix_code_bridge', {}) or {}
+            refine = dc.get('selected_prefix_last_write_refine', {}) or {}
+            second = getattr(draft_model.cfg, 'code_bridge_second_pass', {}) or {}
+            ec.spec_block_size = int(getattr(draft_model.cfg, 'block_size', 16) or 16)
+            ec.spec_mask_token_id = int(dc.get('mask_token_id', 0))
+            ec.spec_selector_top_k = int(refine.get('head_topk') or second.get('head_topk') or 16)
+            ec.spec_selector_rank = int(bridge.get('rank', 512))
+            ec.spec_code_size = int(bridge.get('code_size', 1024))
+            ec.spec_sliding_window = int(getattr(draft_model.cfg, 'sliding_window', 0) or 0)
+            ec.spec_ctx_kv_int4 = 0
 
         logger.info(f'turbomind engine config:\n\n'
                     f'dtype={engine_config.dtype}, state_dtype={state_dtype}, '

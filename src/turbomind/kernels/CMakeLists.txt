@@ -105,6 +105,15 @@ set_property(TARGET dflash2_kernels
 target_link_libraries(dflash2_kernels PRIVATE
     core)
 
+add_library(dspine_kernels STATIC
+    dspine/dspine_kernels.cu)
+set_property(TARGET dspine_kernels
+    PROPERTY POSITION_INDEPENDENT_CODE ON)
+set_property(TARGET dspine_kernels
+    PROPERTY CUDA_RESOLVE_DEVICE_SYMBOLS ON)
+target_link_libraries(dspine_kernels PRIVATE
+    core)
+
 add_library(speculative_sequence_kernels STATIC
     speculative_sequence_kernels.cu)
 set_property(TARGET speculative_sequence_kernels
