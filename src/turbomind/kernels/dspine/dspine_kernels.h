@@ -26,6 +26,7 @@ void invokeDspineAttention(void*        out,
                            int          hd,
                            float        scale,
                            int          window,
+                           int          causal,
                            int          dtype,
                            cudaStream_t stream);
 
@@ -82,7 +83,7 @@ void invokeDspineApply(void*        out,
                        cudaStream_t stream);
 
 /// refine: serial last-write refinement over proposal rows 1..n.
-///   base[i,c]  = rms[i] * values[i,c]
+///   base[i,c]  = rms[i] * pre_logits[i, cand[i,c]]   (pre-write residual logit)
 ///   sid[i,p]   = anchor if i == 0 else cand[i-1,p]
 ///   m[r]       = sigmoid(q[i,r] + tsv[sid, r] + bias[r]) * tsv[sid, R+r]
 ///   score[p,c] = base[i,c] + rms[i] * sum_r m[r] * tg[cand[i,c], r]
@@ -92,17 +93,21 @@ void invokeDspineApply(void*        out,
 /// its q-part from row (i + 1). Writes `tokens[n]`.
 void invokeDspineRefine(int*         tokens,
                         const int*   cand,
-                        const float* values,
+                        const void*  pre_logits,
                         const void*  packed,
                         const void*  tg,
                         const void*  tsv,
                         const void*  gate_bias,
                         const float* rms,
                         const int*   anchor_ptr,
+                        int          vocab,
                         int          n,
                         int          top_k,
                         int          rank,
                         int          dtype,
                         cudaStream_t stream);
+
+/// Deterministic top-1 proposal (debug): tokens[i] = cand[i, 0].
+void invokeDspineTop1(int* tokens, const int* cand, int n, int top_k, cudaStream_t stream);
 
 }  // namespace turbomind

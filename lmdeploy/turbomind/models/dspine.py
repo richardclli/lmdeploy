@@ -45,6 +45,9 @@ class Qwen3DspineTextModel(Qwen3Dflash2TextModel):
     def __init__(self, cfg, *, resolver, prefix='', target_model_path=None):
         super().__init__(cfg, resolver=resolver, prefix=prefix)
         self._target_model_path = target_model_path
+        shift = int(os.environ.get('DSPINE_TAP_SHIFT', '1') or 0)
+        if shift:
+            self.tap_layer_ids = [i + shift for i in self.tap_layer_ids]
         dflash = dict(cfg.dflash_config)
         bridge = dict(dflash['selected_prefix_code_bridge'])
         self._code_size = int(bridge['code_size'])

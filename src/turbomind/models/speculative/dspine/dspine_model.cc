@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 
 #include "src/turbomind/core/check.h"
 #include "src/turbomind/core/copy.h"
@@ -89,6 +90,9 @@ DspineModel::DspineModel(const SpeculativeModelArgs& args):
     rope_base_     = 1e7f;
     max_ctx_       = param_.session_len;
     bridge_eps_    = spec_weights_.hidden_norm->norm_eps_;
+    causal_        = std::getenv("DSPINE_NONCAUSAL") ? 0 : 1;
+    no_delta_      = std::getenv("DSPINE_NO_DELTA") ? 1 : 0;
+    top1_          = std::getenv("DSPINE_TOP1") ? 1 : 0;
 
     if (dw.data_type == kFloat16) {
         dtype_code_ = 1;
@@ -252,6 +256,7 @@ Tensor DspineModel::RunBlock(const Tensor& block_embeddings, const Tensor& posit
                               hd_,
                               qscale,
                               window_,
+                              causal_,
                               dtype_code_,
                               stream);
         lin.Forward(attn.view({rows, local_nh_ * hd_}), *a->wo, o);
@@ -290,6 +295,9 @@ Tensor DspineModel::RunBlock(const Tensor& block_embeddings, const Tensor& posit
         lin.Forward(codes, *spec_weights_.packed, packed);
         invokeDspineMessage(packed.raw_data(), spec_weights_.gate_bias.raw_data(), message.raw_data(), rows, R, block_,
                             dtype_code_, stream);
+        if (no_delta_) {
+            cudaMemsetAsync(message.raw_data(), 0, (size_t)rows * R * byte_size(dtype), stream);
+        }
         lin.Forward(message, *layer->bridge_write, delta);
 
         if (l == dw.num_layer - 1) {
@@ -362,24 +370,38 @@ void DspineModel::RunDraft(int phase, const DraftContext& ctx, TensorMap& env)
     Tensor normed = RunBlock(embeds, bpos_dev, ids, block_, committed, stream, env);
 
     const int L = block_ - 1;
+    // Candidates come from the post-write normed block hidden.
     Tensor    mask_h = normed.slice({1, 0}, {L, hidden_});
     Tensor    logits = target_.Logits(mask_h, {}, env);
     const int vocab  = logits.shape(1);
 
     Buffer_<int>   cand{L * top_k_, kDEVICE};
-    Buffer_<float> values{L * top_k_, kDEVICE};
+    Buffer_<float> values{L * top_k_, kDEVICE};  // top-k logits (candidates only)
     invokeDflash2TopK(cand.data(), values.data(), logits.raw_data(), L, vocab, top_k_, 16, stream);
 
+    // The refinement base uses the PRE-write residual (the layer output before
+    // the bridge delta), normalized by the draft final norm and scored by the
+    // shared head: base = rms_pre * logits(rmsnorm(raw_pre) * head).
+    const NormWeight* fnorm      = dw.norm.get();
+    Tensor            pre_normed{{L, hidden_}, dtype, kDEVICE};
+    Tensor            last_rows = last_raw_.slice({1, 0}, {L, hidden_});
+    invokeRMSNorm(pre_normed, last_rows, fnorm->weight, fnorm->norm_eps_, fnorm->zero_centered_, stream);
+    Tensor    pre_logits = target_.Logits(pre_normed, {}, env);
+
     Buffer_<int> tokens{L, kDEVICE};
-    invokeDspineRefine(tokens.data(),
+    if (top1_) {
+        invokeDspineTop1(tokens.data(), cand.data(), L, top_k_, stream);
+    }
+    else invokeDspineRefine(tokens.data(),
                        cand.data(),
-                       values.data(),
+                       pre_logits.raw_data(),
                        last_packed_.raw_data(),
                        spec_weights_.tg.raw_data(),
                        spec_weights_.tsv.raw_data(),
                        spec_weights_.gate_bias.raw_data(),
                        last_rms_.data() + 1,
                        ids.data(),
+                       vocab,
                        L,
                        top_k_,
                        rank_,

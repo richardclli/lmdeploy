@@ -73,7 +73,8 @@ __global__ void dspine_attn_kernel(T* __restrict__ out,
                                    int  nh,
                                    int  nkv,
                                    float scale,
-                                   int  window)
+                                   int  window,
+                                   int  causal)
 {
     constexpr int ND = HD / 32;
     constexpr int NW = 8;
@@ -84,7 +85,7 @@ __global__ void dspine_attn_kernel(T* __restrict__ out,
     const int kvh = h * nkv / nh;
     const int qpos = tc + i;
     const int first_ctx = max(0, qpos - window + 1);
-    const int nkeys = tc + i + 1;  // causal: block keys [tc, tc+i]
+    const int nkeys = causal ? (tc + i + 1) : (tc + tq);  // causal: block keys [tc, tc+i]
     const int lane = threadIdx.x & 31;
     const int wid  = threadIdx.x >> 5;
 
@@ -184,6 +185,7 @@ void launch_attn(void*        out,
                  int          hd,
                  float        scale,
                  int          window,
+                 int          causal,
                  cudaStream_t stream)
 {
     TM_CHECK_EQ(hd, 128) << "DSpine attention expects head_dim 128";
@@ -200,7 +202,8 @@ void launch_attn(void*        out,
                                                            nh,
                                                            nkv,
                                                            scale,
-                                                           window);
+                                                           window,
+                                                           causal);
 }
 
 // ---------------------------------------------------------------------------
@@ -414,13 +417,14 @@ __global__ void dspine_apply_kernel(T* __restrict__ out,
 template<typename T>
 __global__ void dspine_refine_scores(int* __restrict__ idx,
                                      const int* __restrict__ cand,
-                                     const float* __restrict__ values,
+                                     const T* __restrict__ pre_logits,
                                      const T* __restrict__ packed,
                                      const T* __restrict__ tg,
                                      const T* __restrict__ tsv,
                                      const T* __restrict__ gate_bias,
                                      const float* __restrict__ rms,
                                      const int* __restrict__ anchor_ptr,
+                                     int    vocab,
                                      int    K,
                                      int    R)
 {
@@ -444,7 +448,7 @@ __global__ void dspine_refine_scores(int* __restrict__ idx,
             const float m = g * to_f(ts[R + r]);
             s += m * to_f(tc[r]);
         }
-        const float base = rms[i] * values[i * K + c];
+        const float base = rms[i] * to_f(pre_logits[(long long)i * vocab + ci[c]]);
         sh[e] = base + rms[i] * s;
     }
     __syncthreads();
@@ -460,6 +464,17 @@ __global__ void dspine_refine_scores(int* __restrict__ idx,
             }
         }
         idx[i * K + p] = bi;
+    }
+}
+
+__global__ void dspine_top1_kernel(int* __restrict__ tokens,
+                                   const int* __restrict__ cand,
+                                   int    n,
+                                   int    K)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) {
+        tokens[i] = cand[i * K];
     }
 }
 
@@ -493,17 +508,18 @@ void invokeDspineAttention(void*        out,
                            int          hd,
                            float        scale,
                            int          window,
+                           int          causal,
                            int          dtype,
                            cudaStream_t stream)
 {
     if (dtype == 0) {
-        launch_attn<__nv_bfloat16>(out, q, k_ctx, v_ctx, k_blk, v_blk, tq, tc, nh, nkv, hd, scale, window, stream);
+        launch_attn<__nv_bfloat16>(out, q, k_ctx, v_ctx, k_blk, v_blk, tq, tc, nh, nkv, hd, scale, window, causal, stream);
     }
     else if (dtype == 1) {
-        launch_attn<__half>(out, q, k_ctx, v_ctx, k_blk, v_blk, tq, tc, nh, nkv, hd, scale, window, stream);
+        launch_attn<__half>(out, q, k_ctx, v_ctx, k_blk, v_blk, tq, tc, nh, nkv, hd, scale, window, causal, stream);
     }
     else {
-        launch_attn<float>(out, q, k_ctx, v_ctx, k_blk, v_blk, tq, tc, nh, nkv, hd, scale, window, stream);
+        launch_attn<float>(out, q, k_ctx, v_ctx, k_blk, v_blk, tq, tc, nh, nkv, hd, scale, window, causal, stream);
     }
 }
 
@@ -633,13 +649,14 @@ void invokeDspineApply(void*        out,
 
 void invokeDspineRefine(int*         tokens,
                         const int*   cand,
-                        const float* values,
+                        const void*  pre_logits,
                         const void*  packed,
                         const void*  tg,
                         const void*  tsv,
                         const void*  gate_bias,
                         const float* rms,
                         const int*   anchor_ptr,
+                        int          vocab,
                         int          n,
                         int          top_k,
                         int          rank,
@@ -656,13 +673,14 @@ void invokeDspineRefine(int*         tokens,
         using T = decltype(type_tag);
         dspine_refine_scores<T><<<n, nthreads, shmem, stream>>>(idx,
                                                                 cand,
-                                                                values,
+                                                                static_cast<const T*>(pre_logits),
                                                                 static_cast<const T*>(packed),
                                                                 static_cast<const T*>(tg),
                                                                 static_cast<const T*>(tsv),
                                                                 static_cast<const T*>(gate_bias),
                                                                 rms,
                                                                 anchor_ptr,
+                                                                vocab,
                                                                 top_k,
                                                                 rank);
     };
@@ -677,6 +695,12 @@ void invokeDspineRefine(int*         tokens,
     }
     dspine_chain_kernel<<<1, 1, 0, stream>>>(tokens, cand, idx, n, top_k);
     cudaFreeAsync(idx, stream);
+}
+
+void invokeDspineTop1(int* tokens, const int* cand, int n, int top_k, cudaStream_t stream)
+{
+    const int threads = 128;
+    dspine_top1_kernel<<<(n + threads - 1) / threads, threads, 0, stream>>>(tokens, cand, n, top_k);
 }
 
 }  // namespace turbomind
