@@ -319,7 +319,7 @@ class TurboMind:
             bridge = dc.get('selected_prefix_code_bridge', {}) or {}
             refine = dc.get('selected_prefix_last_write_refine', {}) or {}
             second = getattr(draft_model.cfg, 'code_bridge_second_pass', {}) or {}
-            ec.spec_block_size = int(getattr(draft_model.cfg, 'block_size', 16) or 16)
+            ec.spec_block_size = int(os.environ.get('DSPINE_BLOCK') or getattr(draft_model.cfg, 'block_size', 16) or 16)
             ec.spec_mask_token_id = int(dc.get('mask_token_id', 0))
             ec.spec_selector_top_k = int(refine.get('head_topk') or second.get('head_topk') or 16)
             ec.spec_selector_rank = int(bridge.get('rank', 512))
