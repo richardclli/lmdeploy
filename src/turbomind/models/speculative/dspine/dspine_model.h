@@ -11,6 +11,7 @@
 #include "src/turbomind/models/speculative/speculative_policy.h"
 
 #include <memory>
+#include <string>
 #include <vector>
 
 namespace turbomind {
@@ -63,6 +64,10 @@ private:
     int   no_delta_{0};
     int   top1_{0};
     int   no_context_{0};
+    int   posfix_{0};
+    std::string dump_dir_;
+    bool        dumped_{false};
+    int         dump_round_{0};
 
     std::vector<Tensor> ctx_k_;
     std::vector<Tensor> ctx_v_;

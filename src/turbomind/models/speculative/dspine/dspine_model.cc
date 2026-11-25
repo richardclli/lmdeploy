@@ -4,7 +4,10 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
+#include <string>
+#include <vector>
 
 #include "src/turbomind/core/check.h"
 #include "src/turbomind/core/copy.h"
@@ -26,6 +29,25 @@
 #include "src/turbomind/models/speculative/registry.h"
 
 namespace turbomind {
+
+namespace {
+void dump_dev(const std::string& path, const void* dev, size_t bytes, cudaStream_t stream)
+{
+    std::vector<char> host(bytes);
+    cudaMemcpyAsync(host.data(), dev, bytes, cudaMemcpyDeviceToHost, stream);
+    cudaStreamSynchronize(stream);
+    if (FILE* f = fopen(path.c_str(), "wb")) {
+        fwrite(host.data(), 1, bytes, f);
+        fclose(f);
+    }
+}
+void dump_devd(const std::string& base, const void* dev, size_t bytes, cudaStream_t stream)
+{
+    int d = 0;
+    cudaGetDevice(&d);
+    dump_dev(base + "." + std::to_string(d) + ".bin", dev, bytes, stream);
+}
+}  // namespace
 
 int DspinePolicy::max_proposals() const
 {
@@ -94,6 +116,10 @@ DspineModel::DspineModel(const SpeculativeModelArgs& args):
     no_delta_      = std::getenv("DSPINE_NO_DELTA") ? 1 : 0;
     top1_          = std::getenv("DSPINE_TOP1") ? 1 : 0;
     no_context_    = std::getenv("DSPINE_NO_CONTEXT") ? 1 : 0;
+    posfix_        = std::getenv("DSPINE_POSFIX") ? 1 : 0;
+    if (const char* d = std::getenv("DSPINE_DUMP")) {
+        dump_dir_ = d;
+    }
 
     if (dw.data_type == kFloat16) {
         dtype_code_ = 1;
@@ -153,6 +179,9 @@ void DspineModel::MaterializeContext(const Tensor& context_hidden, const Buffer_
     Tensor x{{rows, hidden_}, dw.data_type, kDEVICE};
     invokeRMSNorm(x, context_hidden, spec_weights_.hidden_norm->weight, eps, zc, stream);
 
+    if (!dump_dir_.empty() && dump_round_ == 0) {
+        dump_dev(dump_dir_ + "/ctx_x.bin", x.raw_data(), x.byte_size(), stream);
+    }
     const int per_row = local_nkv_ * hd_;
     Tensor    qkv2{{rows, total_heads_ * hd_}, dw.data_type, kDEVICE};
     for (int l = 0; l < dw.num_layer; ++l) {
@@ -174,6 +203,11 @@ void DspineModel::MaterializeContext(const Tensor& context_hidden, const Buffer_
         GenericCopy(krow, kc, stream);
         GenericCopy(vrow, vc, stream);
         invokeDflash2Rope(kc.raw_data(), pos_dev.data(), rows, local_nkv_, hd_, rope_base_, bits, stream);
+        if (l == 0 && !dump_dir_.empty() && dump_round_ == 0) {
+            dump_devd(dump_dir_ + "/ctx_kc", kc.raw_data(), kc.byte_size(), stream);
+            dump_devd(dump_dir_ + "/ctx_vc", vc.raw_data(), vc.byte_size(), stream);
+            dump_devd(dump_dir_ + "/ctx_k0", ctx_k_[0].raw_data(), (size_t)rows * per_row * byte_size(dw.data_type), stream);
+        }
         invokeDflash2KvScatter(ctx_k_[l].raw_data(), kc.raw_data(), base_dev.data(), committed_dev.data(), rows,
                                per_row, bits, stream);
         invokeDflash2KvScatter(ctx_v_[l].raw_data(), vc.raw_data(), base_dev.data(), committed_dev.data(), rows,
@@ -262,9 +296,21 @@ Tensor DspineModel::RunBlock(const Tensor& block_embeddings, const Tensor& posit
                               causal_,
                               dtype_code_,
                               stream);
+        if (l == 0 && !dump_dir_.empty() && dump_round_ == 0) {
+            dump_devd(dump_dir_ + "/blk_q", q2.raw_data(), q2.byte_size(), stream);
+            dump_devd(dump_dir_ + "/blk_k", k2.raw_data(), k2.byte_size(), stream);
+            dump_devd(dump_dir_ + "/blk_v", v2.raw_data(), v2.byte_size(), stream);
+            dump_devd(dump_dir_ + "/blk_attn", attn.raw_data(), attn.byte_size(), stream);
+        }
         lin.Forward(attn.view({rows, local_nh_ * hd_}), *a->wo, o);
         allreduce(o);
+        if (l == 0 && !dump_dir_.empty() && dump_round_ == 0) {
+            dump_dev(dump_dir_ + "/L0_o.bin", o.raw_data(), o.byte_size(), stream);
+        }
         invokeDflash2Add(h.raw_data(), residual.raw_data(), o.raw_data(), (long long)rows * hidden_, bits, stream);
+        if (l == 0 && !dump_dir_.empty() && dump_round_ == 0) {
+            dump_dev(dump_dir_ + "/L0_h.bin", h.raw_data(), h.byte_size(), stream);
+        }
 
         invokeRMSNorm(x, h, layer->ffn_norm->weight, layer->ffn_norm->norm_eps_, layer->ffn_norm->zero_centered_,
                       stream);
@@ -286,6 +332,9 @@ Tensor DspineModel::RunBlock(const Tensor& block_embeddings, const Tensor& posit
             TM_CHECK(false) << "DSpine draft layer has no feed-forward weights";
         }
         allreduce(down);
+        if (l == 0 && !dump_dir_.empty() && dump_round_ == 0) {
+            dump_dev(dump_dir_ + "/L0_down.bin", down.raw_data(), down.byte_size(), stream);
+        }
         invokeDflash2Add(cur_out.raw_data(), h.raw_data(), down.raw_data(), (long long)rows * hidden_, bits, stream);
 
         const NormWeight* next_norm = (l + 1 < dw.num_layer) ? dw.layer(l + 1)->attention_norm.get() : dw.norm.get();
@@ -302,6 +351,9 @@ Tensor DspineModel::RunBlock(const Tensor& block_embeddings, const Tensor& posit
             cudaMemsetAsync(message.raw_data(), 0, (size_t)rows * R * byte_size(dtype), stream);
         }
         lin.Forward(message, *layer->bridge_write, delta);
+        if (l == 0 && !dump_dir_.empty() && dump_round_ == 0) {
+            dump_dev(dump_dir_ + "/L0_delta.bin", delta.raw_data(), delta.byte_size(), stream);
+        }
 
         if (l == dw.num_layer - 1) {
             GenericCopy(cur_out, last_raw_, stream);
@@ -321,7 +373,17 @@ Tensor DspineModel::RunBlock(const Tensor& block_embeddings, const Tensor& posit
                           next_norm->norm_eps_,
                           dtype_code_,
                           stream);
+        if (!dump_dir_.empty() && dump_round_ == 0) {
+            char nm[64];
+            snprintf(nm, sizeof(nm), "/L%d_out2.bin", l);
+            dump_dev(dump_dir_ + nm, cur_out.raw_data(), cur_out.byte_size(), stream);
+            snprintf(nm, sizeof(nm), "/L%d_xin.bin", l);
+            dump_dev(dump_dir_ + nm, x.raw_data(), x.byte_size(), stream);
+        }
         residual = cur_out;
+    }
+    if (dump_round_ == 0) {
+        ++dump_round_;
     }
     return x;
 }
@@ -360,6 +422,11 @@ void DspineModel::RunDraft(int phase, const DraftContext& ctx, TensorMap& env)
     cudaStreamSynchronize(stream);
     int committed = 0;
     cudaMemcpy(&committed, committed_dev.data(), sizeof(int), cudaMemcpyDeviceToHost);
+    int base_h = 0;
+    cudaMemcpy(&base_h, base_dev.data(), sizeof(int), cudaMemcpyDeviceToHost);
+    const int ctx_total = base_h + (int)context_hidden.shape(0);
+    const int pos0      = committed;
+    const int tc        = posfix_ ? ctx_total : committed;
 
     Buffer_<int> ids{block_, kDEVICE};
     invokeDflash2BuildBlockIds(ids.data(), ctx.request_token_ids_ptrs, committed_dev.data(), block_, mask_token_id_,
@@ -368,10 +435,12 @@ void DspineModel::RunDraft(int phase, const DraftContext& ctx, TensorMap& env)
     Tensor embed_buf{{block_, hidden_}, dtype, kDEVICE};
     Tensor embeds = target_.Embed(ids, embed_buf, env);
 
+    Buffer_<int> cstart{1, kDEVICE};
+    cudaMemcpyAsync(cstart.data(), &pos0, sizeof(int), cudaMemcpyHostToDevice, stream);
     Buffer_<int> bpos_dev{block_, kDEVICE};
-    invokeDflash2CountUp(bpos_dev.data(), committed_dev.data(), block_, stream);
+    invokeDflash2CountUp(bpos_dev.data(), cstart.data(), block_, stream);
 
-    Tensor normed = RunBlock(embeds, bpos_dev, ids, block_, committed, stream, env);
+    Tensor normed = RunBlock(embeds, bpos_dev, ids, block_, tc, stream, env);
 
     const int L = block_ - 1;
     // Candidates come from the post-write normed block hidden.
@@ -411,6 +480,27 @@ void DspineModel::RunDraft(int phase, const DraftContext& ctx, TensorMap& env)
                        rank_,
                        dtype_code_,
                        stream);
+
+    if (!dump_dir_.empty() && !dumped_) {
+        dumped_                     = true;
+        const int ctx_rows            = (int)context_hidden.shape(0);
+        dump_dev(dump_dir_ + "/embeds.bin", embeds.raw_data(), embeds.byte_size(), stream);
+        dump_dev(dump_dir_ + "/ctxhidden.bin", context_hidden.raw_data(), context_hidden.byte_size(), stream);
+        dump_dev(dump_dir_ + "/ids.bin", ids.data(), (size_t)block_ * sizeof(int), stream);
+        dump_dev(dump_dir_ + "/bpos.bin", bpos_dev.data(), (size_t)block_ * sizeof(int), stream);
+        dump_dev(dump_dir_ + "/base.bin", base_dev.data(), sizeof(int), stream);
+        dump_dev(dump_dir_ + "/maskh_cpp.bin", mask_h.raw_data(), mask_h.byte_size(), stream);
+        dump_dev(dump_dir_ + "/cand_cpp.bin", cand.data(), (size_t)L * top_k_ * sizeof(int), stream);
+        dump_dev(dump_dir_ + "/lastraw_cpp.bin", last_raw_.raw_data(), last_raw_.byte_size(), stream);
+        dump_dev(dump_dir_ + "/lastrms_cpp.bin", last_rms_.data(), (size_t)block_ * sizeof(float), stream);
+        dump_dev(dump_dir_ + "/prelogits_cpp.bin", pre_logits.raw_data(), pre_logits.byte_size(), stream);
+        dump_dev(dump_dir_ + "/tokens_cpp.bin", tokens.data(), (size_t)L * sizeof(int), stream);
+        if (FILE* m = fopen((dump_dir_ + "/meta.txt").c_str(), "w")) {
+            fprintf(m, "ctx_rows=%d committed=%d block=%d hidden=%d L=%d K=%d vocab=%d dtype_code=%d\n",
+                    ctx_rows, committed, block_, hidden_, L, top_k_, vocab, dtype_code_);
+            fclose(m);
+        }
+    }
 
     Buffer_<int> sb{1, kDEVICE};
     Copy(committed_dev, sb);
