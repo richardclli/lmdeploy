@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <chrono>
 #include <string>
 #include <vector>
 
@@ -117,6 +118,7 @@ DspineModel::DspineModel(const SpeculativeModelArgs& args):
     top1_          = std::getenv("DSPINE_TOP1") ? 1 : 0;
     no_context_    = std::getenv("DSPINE_NO_CONTEXT") ? 1 : 0;
     posfix_        = std::getenv("DSPINE_POSFIX") ? 1 : 0;
+    time_ = std::getenv("DSPINE_TIME") != nullptr;
     if (const char* d = std::getenv("DSPINE_DUMP")) {
         dump_dir_ = d;
     }
@@ -400,6 +402,19 @@ void DspineModel::RunDraft(int phase, const DraftContext& ctx, TensorMap& env)
     const auto     stream = core::Context::stream().handle();
     const DataType dtype  = dw.data_type;
     const int bits = dtype_code_ == 0 ? 8 : (dtype_code_ == 1 ? 16 : 32);
+    auto t_start = std::chrono::steady_clock::now();
+    auto last    = t_start;
+    static double g_sec[6] = {0};
+    static long   g_n      = 0;
+    auto lap = [&](int i) {
+        if (!time_) {
+            return;
+        }
+        cudaStreamSynchronize(stream);
+        auto now = std::chrono::steady_clock::now();
+        g_sec[i] += std::chrono::duration<double, std::milli>(now - last).count();
+        last = now;
+    };
 
     Tensor context_hidden = projection_->ProjectAndGather(phase, stream);
     const int rows = context_hidden.shape(0);
@@ -428,6 +443,7 @@ void DspineModel::RunDraft(int phase, const DraftContext& ctx, TensorMap& env)
     const int pos0      = committed;
     const int tc        = posfix_ ? ctx_total : committed;
 
+    lap(0);
     Buffer_<int> ids{block_, kDEVICE};
     invokeDflash2BuildBlockIds(ids.data(), ctx.request_token_ids_ptrs, committed_dev.data(), block_, mask_token_id_,
                                stream);
@@ -441,25 +457,34 @@ void DspineModel::RunDraft(int phase, const DraftContext& ctx, TensorMap& env)
     invokeDflash2CountUp(bpos_dev.data(), cstart.data(), block_, stream);
 
     Tensor normed = RunBlock(embeds, bpos_dev, ids, block_, tc, stream, env);
+    lap(1);
 
     const int L = block_ - 1;
     // Candidates come from the post-write normed block hidden.
     Tensor    mask_h = normed.slice({1, 0}, {L, hidden_});
-    Tensor    logits = target_.Logits(mask_h, {}, env);
-    const int vocab  = logits.shape(1);
-
-    Buffer_<int>   cand{L * top_k_, kDEVICE};
-    Buffer_<float> values{L * top_k_, kDEVICE};  // top-k logits (candidates only)
-    invokeDflash2TopK(cand.data(), values.data(), logits.raw_data(), L, vocab, top_k_, bits, stream);
-
-    // The refinement base uses the PRE-write residual (the layer output before
-    // the bridge delta), normalized by the draft final norm and scored by the
-    // shared head: base = rms_pre * logits(rmsnorm(raw_pre) * head).
+    // The refinement base uses the PRE-write residual (layer output before the
+    // bridge delta), normalized by the draft final norm and scored by the head.
     const NormWeight* fnorm      = dw.norm.get();
     Tensor            pre_normed{{L, hidden_}, dtype, kDEVICE};
     Tensor            last_rows = last_raw_.slice({1, 0}, {L, hidden_});
     invokeRMSNorm(pre_normed, last_rows, fnorm->weight, fnorm->norm_eps_, fnorm->zero_centered_, stream);
-    Tensor    pre_logits = target_.Logits(pre_normed, {}, env);
+    // One head pass over both row sets (post-write for top-k, pre-write for base).
+    Tensor comb{{2 * L, hidden_}, dtype, kDEVICE};
+    Tensor comb_post = comb.slice({0, 0}, {L, hidden_});
+    Tensor comb_pre  = comb.slice({L, 0}, {L, hidden_});
+    GenericCopy(mask_h, comb_post, stream);
+    GenericCopy(pre_normed, comb_pre, stream);
+    Tensor comb_logits = target_.Logits(comb, {}, env);
+    lap(2);
+    const int vocab      = comb_logits.shape(1);
+    Tensor    logits     = comb_logits.slice({0, 0}, {L, vocab});
+    Tensor    pre_logits = comb_logits.slice({L, 0}, {L, vocab});
+
+    Buffer_<int>   cand{L * top_k_, kDEVICE};
+    Buffer_<float> values{L * top_k_, kDEVICE};  // top-k logits (candidates only)
+    invokeDflash2TopK(cand.data(), values.data(), logits.raw_data(), L, vocab, top_k_, bits, stream);
+    lap(3);
+    lap(4);
 
     Buffer_<int> tokens{L, kDEVICE};
     if (top1_) {
@@ -505,6 +530,16 @@ void DspineModel::RunDraft(int phase, const DraftContext& ctx, TensorMap& env)
     Buffer_<int> sb{1, kDEVICE};
     Copy(committed_dev, sb);
     invokeDflash2StoreTokens(ctx.request_token_ids_ptrs, tokens.data(), sb.data(), L, stream);
+
+    lap(5);
+    if (time_) {
+        ++g_n;
+        if (g_n % 50 == 0) {
+            fprintf(stderr,
+                    "[DSPINE_TIME] n=%ld proj+mat %.2f block %.2f postlog %.2f topk %.2f prelog %.2f refine+store %.2f ms\n",
+                    g_n, g_sec[0] / g_n, g_sec[1] / g_n, g_sec[2] / g_n, g_sec[3] / g_n, g_sec[4] / g_n, g_sec[5] / g_n);
+        }
+    }
 }
 
 TM_REGISTER_SPECULATIVE_MODEL("dspine", DspineModel);

@@ -65,6 +65,7 @@ private:
     int   top1_{0};
     int   no_context_{0};
     int   posfix_{0};
+    bool  time_{false};
     std::string dump_dir_;
     bool        dumped_{false};
     int         dump_round_{0};
