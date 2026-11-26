@@ -324,7 +324,8 @@ class TurboMind:
             ec.spec_selector_top_k = int(refine.get('head_topk') or second.get('head_topk') or 16)
             ec.spec_selector_rank = int(bridge.get('rank', 512))
             ec.spec_code_size = int(bridge.get('code_size', 1024))
-            ec.spec_sliding_window = int(getattr(draft_model.cfg, 'sliding_window', 0) or 0)
+            ec.spec_sliding_window = int(os.environ.get('DSPINE_WINDOW')
+                                         or getattr(draft_model.cfg, 'sliding_window', 0) or 0)
             if speculative_config.dflash_ctx_kv_int4 is not None:
                 ec.spec_ctx_kv_int4 = int(speculative_config.dflash_ctx_kv_int4)
             else:

@@ -6,6 +6,8 @@
 #include <cuda_bf16.h>
 #include <math_constants.h>
 #include <cfloat>
+#include <cstdlib>
+#include <type_traits>
 
 #include "src/turbomind/core/check.h"
 
@@ -57,11 +59,18 @@ __device__ __forceinline__ float warp_reduce_sum(float x)
     return x;
 }
 
+inline int attn_warps()
+{
+    const char* e = std::getenv("DSPINE_ATTN_WARPS");
+    const int   w = e ? std::atoi(e) : 16;
+    return (w == 8 || w == 32) ? w : 16;
+}
+
 // ---------------------------------------------------------------------------
 // Causal block attention (context within window | causal block)
 // ---------------------------------------------------------------------------
 
-template<typename T, int HD>
+template<typename T, int HD, int NW>
 __global__ void dspine_attn_kernel(T* __restrict__ out,
                                    const T* __restrict__ q,
                                    const T* __restrict__ k_ctx,
@@ -77,7 +86,6 @@ __global__ void dspine_attn_kernel(T* __restrict__ out,
                                    int  causal)
 {
     constexpr int ND = HD / 32;
-    constexpr int NW = 8;
 
     const int bh  = blockIdx.x;
     const int i   = bh / nh;
@@ -189,21 +197,19 @@ void launch_attn(void*        out,
                  cudaStream_t stream)
 {
     TM_CHECK_EQ(hd, 128) << "DSpine attention expects head_dim 128";
-    const int grid  = tq * nh;
-    const int block = 256;
-    dspine_attn_kernel<T, 128><<<grid, block, 0, stream>>>(static_cast<T*>(out),
-                                                           static_cast<const T*>(q),
-                                                           static_cast<const T*>(k_ctx),
-                                                           static_cast<const T*>(v_ctx),
-                                                           static_cast<const T*>(k_blk),
-                                                           static_cast<const T*>(v_blk),
-                                                           tq,
-                                                           tc,
-                                                           nh,
-                                                           nkv,
-                                                           scale,
-                                                           window,
-                                                           causal);
+    const int grid = tq * nh;
+    auto      run  = [&](auto nw) {
+        constexpr int NW = decltype(nw)::value;
+        dspine_attn_kernel<T, 128, NW><<<grid, NW * 32, 0, stream>>>(
+            static_cast<T*>(out), static_cast<const T*>(q), static_cast<const T*>(k_ctx),
+            static_cast<const T*>(v_ctx), static_cast<const T*>(k_blk), static_cast<const T*>(v_blk), tq, tc, nh,
+            nkv, scale, window, causal);
+    };
+    switch (attn_warps()) {
+        case 16: run(std::integral_constant<int, 16>{}); break;
+        case 32: run(std::integral_constant<int, 32>{}); break;
+        default: run(std::integral_constant<int, 8>{}); break;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -710,7 +716,7 @@ void invokeDspineTop1(int* tokens, const int* cand, int n, int top_k, cudaStream
 
 namespace {
 
-template<typename T>
+template<typename T, int NW>
 __global__ void dspine_attn_int4_kernel(T* __restrict__ out,
                                         const T* __restrict__ q,
                                         const unsigned char* __restrict__ k_ctx_data,
@@ -729,7 +735,6 @@ __global__ void dspine_attn_int4_kernel(T* __restrict__ out,
 {
     constexpr int HD = 128;
     constexpr int ND = HD / 32;
-    constexpr int NW = 8;
 
     const int bh  = blockIdx.x;
     const int i   = bh / nh;
@@ -855,14 +860,20 @@ void launch_attn_int4(void* out, const void* q, const void* k_ctx_data, const vo
                       cudaStream_t stream)
 {
     TM_CHECK_EQ(hd, 128) << "DSpine int4 attention expects head_dim 128";
-    const int grid  = tq * nh;
-    const int block = 256;
-    dspine_attn_int4_kernel<T><<<grid, block, 0, stream>>>(
-        static_cast<T*>(out), static_cast<const T*>(q),
-        static_cast<const unsigned char*>(k_ctx_data), static_cast<const T*>(k_ctx_param),
-        static_cast<const unsigned char*>(v_ctx_data), static_cast<const T*>(v_ctx_param),
-        static_cast<const T*>(k_blk), static_cast<const T*>(v_blk),
-        tq, tc, nh, nkv, scale, window, causal);
+    const int grid = tq * nh;
+    auto      run  = [&](auto nw) {
+        constexpr int NW = decltype(nw)::value;
+        dspine_attn_int4_kernel<T, NW><<<grid, NW * 32, 0, stream>>>(
+            static_cast<T*>(out), static_cast<const T*>(q), static_cast<const unsigned char*>(k_ctx_data),
+            static_cast<const T*>(k_ctx_param), static_cast<const unsigned char*>(v_ctx_data),
+            static_cast<const T*>(v_ctx_param), static_cast<const T*>(k_blk), static_cast<const T*>(v_blk), tq, tc,
+            nh, nkv, scale, window, causal);
+    };
+    switch (attn_warps()) {
+        case 16: run(std::integral_constant<int, 16>{}); break;
+        case 32: run(std::integral_constant<int, 32>{}); break;
+        default: run(std::integral_constant<int, 8>{}); break;
+    }
 }
 
 }  // namespace
